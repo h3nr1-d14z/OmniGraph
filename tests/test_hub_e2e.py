@@ -44,6 +44,27 @@ def test_embed_service(vectors):
     assert len(vectors) == 2
 
 
+def test_content_store_fts_search_sync(tmp_path):
+    store = ContentStore(str(tmp_path / "content.db"))
+    machine_id = "m-fts"
+    project = "demo"
+    file_path = "/workspace/demo/src/search.go"
+
+    store.upsert_file(machine_id, project, file_path, "package main\nfunc AlphaSearch() string { return \"needle\" }\n")
+    results = store.search_files_exact("AlphaSearch needle", machine_id=machine_id, project_scope=project)
+    assert results
+    assert results[0]["file_path"] == file_path
+
+    store.upsert_file(machine_id, project, file_path, "package main\nfunc BetaSearch() string { return \"haystack\" }\n")
+    assert not store.search_files_exact("AlphaSearch needle", machine_id=machine_id, project_scope=project)
+    results = store.search_files_exact("BetaSearch haystack", machine_id=machine_id, project_scope=project)
+    assert results
+    assert results[0]["file_path"] == file_path
+
+    store.delete_file(machine_id, file_path)
+    assert not store.search_files_exact("BetaSearch haystack", machine_id=machine_id, project_scope=project)
+
+
 def test_content_store_refresh_project_tree(tmp_path):
     store = ContentStore(str(tmp_path / "content.db"))
     machine_id = "m-tree"

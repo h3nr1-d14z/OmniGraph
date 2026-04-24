@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -59,6 +60,14 @@ class ContentStore:
                 embedding_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                machine_id UNINDEXED,
+                project UNINDEXED,
+                file_path,
+                content,
+                tokenize='unicode61',
+                prefix='2 3 4'
+            );
             """
         )
 
@@ -80,7 +89,21 @@ class ContentStore:
             """,
             [(machine_id, project, file_path, content, updated_at) for machine_id, project, file_path, content in files],
         )
+        self._sync_fts(files)
         self._conn.commit()
+
+    def _sync_fts(self, files: list[tuple[str, str, str, str]]) -> None:
+        self._conn.executemany(
+            "DELETE FROM files_fts WHERE machine_id = ? AND file_path = ?",
+            [(machine_id, file_path) for machine_id, _, file_path, _ in files],
+        )
+        self._conn.executemany(
+            """
+            INSERT INTO files_fts (machine_id, project, file_path, content)
+            VALUES (?, ?, ?, ?)
+            """,
+            files,
+        )
 
     def get_file(self, machine_id: str, file_path: str) -> str | None:
         row = self._conn.execute(
@@ -92,6 +115,10 @@ class ContentStore:
     def delete_file(self, machine_id: str, file_path: str) -> None:
         self._conn.execute(
             "DELETE FROM files WHERE machine_id = ? AND file_path = ?",
+            (machine_id, file_path),
+        )
+        self._conn.execute(
+            "DELETE FROM files_fts WHERE machine_id = ? AND file_path = ?",
             (machine_id, file_path),
         )
         self._conn.commit()
@@ -165,12 +192,12 @@ class ContentStore:
         project_scope: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, str | float]]:
-        terms = [term.lower() for term in query.split() if term.strip()]
-        if not terms:
+        fts_query = _fts_query(query)
+        if not fts_query:
             return []
 
-        clauses: list[str] = []
-        params: list[str] = []
+        clauses = ["files_fts MATCH ?"]
+        params: list[str] = [fts_query]
         if machine_id:
             clauses.append("machine_id = ?")
             params.append(machine_id)
@@ -178,44 +205,34 @@ class ContentStore:
             clauses.append("project = ?")
             params.append(project_scope)
 
-        like_clauses = ["lower(content) LIKE ?" for _ in terms]
-        params.extend([f"%{term}%" for term in terms])
-        where = " AND ".join(clauses + ["(" + " OR ".join(like_clauses) + ")"])
         rows = self._conn.execute(
             f"""
-            SELECT machine_id, project, file_path, content
-            FROM files
-            WHERE {where}
-            ORDER BY updated_at DESC
-            LIMIT 200
+            SELECT machine_id, project, file_path, content, rank
+            FROM files_fts
+            WHERE {" AND ".join(clauses)}
+            ORDER BY rank
+            LIMIT ?
             """,
-            params,
+            [*params, limit],
         ).fetchall()
 
-        scored: list[dict[str, str | float]] = []
-        phrase = query.lower()
-        for row_machine_id, row_project, file_path, content in rows:
-            lower_content = (content or "").lower()
-            lower_path = file_path.lower()
-            score = 0.0
-            if phrase in lower_content:
-                score += 5.0
-            score += sum(1.0 for term in terms if term in lower_content)
-            score += sum(0.5 for term in terms if term in lower_path)
-            if score <= 0:
-                continue
-            scored.append(
-                {
-                    "machine_id": row_machine_id,
-                    "project": row_project,
-                    "file_path": file_path,
-                    "snippet": (content or "")[:500],
-                    "score": score,
-                }
-            )
+        return [
+            {
+                "machine_id": row_machine_id,
+                "project": row_project,
+                "file_path": file_path,
+                "snippet": (content or "")[:500],
+                "score": 1.0 / (1.0 + max(float(rank), 0.0)),
+            }
+            for row_machine_id, row_project, file_path, content, rank in rows
+        ]
 
-        scored.sort(key=lambda item: item["score"], reverse=True)
-        return scored[:limit]
+
+def _fts_query(query: str) -> str:
+    terms = re.findall(r"[\w./-]+", query.lower())
+    if not terms:
+        return ""
+    return " OR ".join(f'"{term}"' for term in terms[:16])
 
 
 def _build_tree_from_paths(file_paths: list[str], project: str) -> str:
