@@ -13,10 +13,15 @@ import (
 
 // Client sends batches to the Hub.
 type Client struct {
-	BaseURL   string
-	AuthToken string
-	MachineID string
-	HTTP      *http.Client
+	BaseURL      string
+	AuthToken    string
+	MachineID    string
+	HTTP         *http.Client
+	RetryBackoff func(attempt int) time.Duration
+}
+
+func defaultRetryBackoff(attempt int) time.Duration {
+	return time.Duration(attempt) * 2 * time.Second
 }
 
 // NewClient creates a sender with retry logic.
@@ -28,6 +33,7 @@ func NewClient(baseURL, token, machineID string) *Client {
 		HTTP: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		RetryBackoff: defaultRetryBackoff,
 	}
 }
 
@@ -47,8 +53,8 @@ func (c *Client) SendBatch(events []models.FileEvent, project string) error {
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		if attempt > 0 && c.RetryBackoff != nil {
+			time.Sleep(c.RetryBackoff(attempt))
 		}
 
 		req, err := http.NewRequest("POST", c.BaseURL+"/batch", bytes.NewReader(body))

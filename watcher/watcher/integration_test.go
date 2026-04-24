@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -325,6 +326,114 @@ func TestDebouncedWatcher_ChunksByBatchSize(t *testing.T) {
 	}
 	if count != 5 {
 		t.Fatalf("expected 5 events, got %d", count)
+	}
+}
+
+func TestDebouncedWatcher_QueuesAndDrainsWhenHubRecovers(t *testing.T) {
+	dir := t.TempDir()
+	received := &receivedBatches{}
+	var hubUp atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/batch" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer test-token" {
+			t.Errorf("unexpected auth: %s", auth)
+		}
+		if !hubUp.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		var payload models.BatchPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received.append(payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.WatcherConfig{
+		MachineID:   "test-machine",
+		WatchRoot:   dir,
+		ProjectName: "offline-project",
+	}
+	cfg.Hub.URL = server.URL
+	cfg.Hub.AuthToken = "test-token"
+	cfg.Hub.BatchSec = 60
+	cfg.Hub.BatchSize = 50
+
+	filter, err := NewIgnoreFilter(dir, false, false, nil)
+	if err != nil {
+		t.Fatalf("ignore filter: %v", err)
+	}
+	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	client.RetryBackoff = func(int) time.Duration { return 0 }
+	queue, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	defer queue.Close()
+
+	dw, err := NewDebouncedWatcher(cfg, filter, nil, client, queue)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	events := []models.FileEvent{{
+		Type:        models.EventCreate,
+		Path:        filepath.Join(dir, "offline.go"),
+		Project:     "offline-project",
+		MachineID:   cfg.MachineID,
+		Timestamp:   time.Now().Unix(),
+		ContentHash: "offline-hash",
+		Content:     "package main\nfunc offline() {}\n",
+		Entities: []models.Entity{{
+			Name:      "offline",
+			Type:      "function",
+			Line:      2,
+			StartLine: 2,
+			EndLine:   2,
+		}},
+	}}
+
+	dw.sendOrQueue("offline-project", events)
+	queued, err := queue.Len()
+	if err != nil {
+		t.Fatalf("queue len after failed send: %v", err)
+	}
+	if queued != 1 {
+		t.Fatalf("expected 1 queued batch while hub is down, got %d", queued)
+	}
+	if got := len(received.snapshot()); got != 0 {
+		t.Fatalf("expected no successful batches while hub is down, got %d", got)
+	}
+
+	hubUp.Store(true)
+	if err := dw.DrainQueue(); err != nil {
+		t.Fatalf("drain queue: %v", err)
+	}
+	queued, err = queue.Len()
+	if err != nil {
+		t.Fatalf("queue len after drain: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("expected queue to be acked after drain, got %d", queued)
+	}
+
+	batches := received.snapshot()
+	if len(batches) != 1 {
+		t.Fatalf("expected 1 drained batch, got %d", len(batches))
+	}
+	if batches[0].MachineID != cfg.MachineID || batches[0].Project != "offline-project" {
+		t.Fatalf("unexpected drained batch scope: %#v", batches[0])
+	}
+	if len(batches[0].Events) != 1 || batches[0].Events[0].Path != events[0].Path {
+		t.Fatalf("unexpected drained events: %#v", batches[0].Events)
 	}
 }
 
