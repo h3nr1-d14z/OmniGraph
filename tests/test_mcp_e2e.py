@@ -1,11 +1,17 @@
 """End-to-end test for Phase 3: MCP Server (4 tools)."""
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hub", "mcp_server"))
+from fastmcp import Client
+from fastmcp.client.transports import PythonStdioTransport
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "hub" / "mcp_server"))
 
 from models.schema import (
     DependencyGraphInput,
@@ -32,22 +38,23 @@ def test_read_full_file_local():
         os.unlink(path)
 
 
-def test_get_project_tree_local():
+def _assert_project_tree_local(base_dir: Path) -> None:
     print("[test] get_project_tree local fallback ...")
-    proj_dir = os.path.join(os.getcwd(), "testproj")
-    src_dir = os.path.join(proj_dir, "src")
-    os.makedirs(src_dir, exist_ok=True)
-    with open(os.path.join(src_dir, "main.go"), "w") as f:
-        f.write("package main\n")
-    try:
-        inp = ProjectTreeInput(machine_id="local", project_name="testproj")
-        tree = get_project_tree(inp)
-        assert "src/" in tree, tree
-        assert "main.go" in tree, tree
-        print("[test] get_project_tree OK")
-    finally:
-        import shutil
-        shutil.rmtree(proj_dir, ignore_errors=True)
+    proj_dir = base_dir / "testproj"
+    src_dir = proj_dir / "src"
+    src_dir.mkdir(parents=True)
+    (src_dir / "main.go").write_text("package main\n")
+
+    inp = ProjectTreeInput(machine_id="local", project_name="testproj")
+    tree = get_project_tree(inp)
+    assert "src/" in tree, tree
+    assert "main.go" in tree, tree
+    print("[test] get_project_tree OK")
+
+
+def test_get_project_tree_local(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _assert_project_tree_local(tmp_path)
 
 
 def test_project_tree_cap():
@@ -81,11 +88,50 @@ def test_tool_schemas():
     print("[test] schemas OK")
 
 
+async def _stdio_transport_smoke(content_db_path: Path):
+    env = os.environ.copy()
+    env["CONTENT_DB_PATH"] = str(content_db_path)
+    transport = PythonStdioTransport(
+        PROJECT_ROOT / "hub" / "mcp_server" / "server.py",
+        env=env,
+        cwd=str(PROJECT_ROOT / "hub" / "mcp_server"),
+        python_cmd=sys.executable,
+    )
+
+    async with Client(transport, init_timeout=15) as client:
+        await client.ping()
+        tools = await client.list_tools()
+        tool_names = {tool.name for tool in tools}
+        assert tool_names == {
+            "semantic_search_code_tool",
+            "get_dependency_graph_tool",
+            "read_full_file_tool",
+            "get_project_tree_tool",
+        }
+
+        result = await client.call_tool(
+            "read_full_file_tool",
+            {"machine_id": "local", "file_path": str(PROJECT_ROOT / "README.md")},
+        )
+        assert "# OmniGraph" in result.data
+
+
+def test_mcp_server_stdio_transport(tmp_path):
+    asyncio.run(_stdio_transport_smoke(tmp_path / "mcp-content.db"))
+
+
 def main():
     print("=== OmniGraph Phase 3 E2E Test ===\n")
     test_tool_schemas()
     test_read_full_file_local()
-    test_get_project_tree_local()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(tmp_dir)
+            _assert_project_tree_local(Path(tmp_dir))
+            asyncio.run(_stdio_transport_smoke(Path(tmp_dir) / "mcp-content.db"))
+        finally:
+            os.chdir(previous_cwd)
     print("\n=== All Phase 3 tests passed ===")
 
 
