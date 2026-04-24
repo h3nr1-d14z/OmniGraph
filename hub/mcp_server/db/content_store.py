@@ -23,8 +23,12 @@ class ContentStore:
 
     def __init__(self, db_path: str | None = None):
         if db_path is None:
-            home = Path.home()
-            db_path = home / ".config" / "omnigraph" / "hub-content.db"
+            env_path = os.getenv("CONTENT_DB_PATH")
+            if env_path:
+                db_path = Path(env_path)
+            else:
+                home = Path.home()
+                db_path = home / ".config" / "omnigraph" / "hub-content.db"
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # Persistent connection for the lifetime of the instance

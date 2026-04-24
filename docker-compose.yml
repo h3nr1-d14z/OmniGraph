@@ -73,6 +73,9 @@ services:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
       - MEMGRAPH_URI=bolt://memgraph:7687
+      - CONTENT_DB_PATH=/data/hub-content.db
+    volumes:
+      - ./data:/data
     mem_limit: ${HUB_API_MEM_LIMIT:-2g}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)\""]
