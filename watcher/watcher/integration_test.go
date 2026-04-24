@@ -493,6 +493,36 @@ func TestExtractSymbols_IncludesLineRanges(t *testing.T) {
 	t.Fatalf("main entity not found: %#v", entities)
 }
 
+func TestExtractGraph_GoRelations(t *testing.T) {
+	content := []byte("package main\n\nimport \"fmt\"\n\nfunc helper() {}\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\thelper()\n}\n")
+	entities, relations, err := ExtractGraph("main.go", content)
+	if err != nil {
+		t.Fatalf("extract graph: %v", err)
+	}
+	if len(entities) < 2 {
+		t.Fatalf("expected function entities, got %#v", entities)
+	}
+
+	want := map[string]bool{
+		"CONTAINS::main":                false,
+		"CONTAINS::helper":              false,
+		"IMPORTS::fmt":                  false,
+		"CALLS_SYNTAX:main:fmt.Println": false,
+		"CALLS_SYNTAX:main:helper":      false,
+	}
+	for _, rel := range relations {
+		key := rel.Type + ":" + rel.Source + ":" + rel.Target
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, found := range want {
+		if !found {
+			t.Fatalf("missing relation %s in %#v", key, relations)
+		}
+	}
+}
+
 func TestIgnoreFilter_Hardcoded(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "node_modules", "foo"), 0755)

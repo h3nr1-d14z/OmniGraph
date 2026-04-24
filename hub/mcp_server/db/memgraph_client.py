@@ -7,6 +7,11 @@ import neo4j
 
 ALLOWED_RELATIONS = {"DEPENDS_ON", "CALLS", "IMPORTS", "IMPLEMENTS", "EXTENDS"}
 
+
+def _node_id(node: Any) -> str:
+    data = dict(node)
+    return data.get("file_path") or data.get("path") or data.get("name", "")
+
 # Module-level singleton: one driver per process
 _memgraph_instance: "MemgraphCodeGraph | None" = None
 
@@ -45,6 +50,9 @@ class MemgraphCodeGraph:
             session.run("CREATE INDEX ON :Entity(name)")
             session.run("CREATE INDEX ON :Entity(project)")
             session.run("CREATE INDEX ON :Entity(machine_id)")
+            session.run("CREATE INDEX ON :File(path)")
+            session.run("CREATE INDEX ON :Module(name)")
+            session.run("CREATE INDEX ON :UnresolvedSymbol(name)")
 
     def close(self) -> None:
         self._driver.close()
@@ -105,32 +113,111 @@ class MemgraphCodeGraph:
             return
         query = """
         UNWIND $entities AS ent
+        MERGE (f:File {path: ent.file_path, machine_id: ent.machine_id})
+        SET f.project = ent.project,
+            f.updated_at = timestamp()
         MERGE (e:Entity {file_path: ent.file_path, machine_id: ent.machine_id, name: ent.name})
         SET e.project = ent.project,
             e.type = ent.type,
             e.content_hash = ent.content_hash,
+            e.start_line = ent.start_line,
+            e.end_line = ent.end_line,
             e.updated_at = timestamp()
+        MERGE (f)-[r:CONTAINS]->(e)
+        SET r.updated_at = timestamp()
         """
         with self._driver.session() as session:
             session.run(query, entities=entities)
 
+    def upsert_relations(self, relations: list[dict[str, Any]]) -> None:
+        if not relations:
+            return
+        imports = [rel for rel in relations if rel["type"] == "IMPORTS"]
+        calls = [rel for rel in relations if rel["type"] == "CALLS_SYNTAX" and rel.get("source")]
+        contains = [rel for rel in relations if rel["type"] == "CONTAINS"]
+        with self._driver.session() as session:
+            if imports:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                    SET f.project = rel.project,
+                        f.updated_at = timestamp()
+                    MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
+                    SET m.project = rel.project,
+                        m.language = "go",
+                        m.updated_at = timestamp()
+                    MERGE (f)-[r:IMPORTS]->(m)
+                    SET r.raw = rel.target,
+                        r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=imports,
+                )
+            if calls:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                    MERGE (target:UnresolvedSymbol {name: rel.target, machine_id: rel.machine_id})
+                    SET target.project = rel.project,
+                        target.updated_at = timestamp()
+                    MERGE (source)-[r:CALLS_SYNTAX]->(target)
+                    SET r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=calls,
+                )
+            if contains:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MATCH (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                    MATCH (e:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.target})
+                    MERGE (f)-[r:CONTAINS]->(e)
+                    SET r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=contains,
+                )
+
     def delete_file(self, file_path: str, machine_id: str) -> None:
-        """Tombstone: delete entity and its edges."""
+        """Tombstone: delete file, entities, and their edges."""
         query = """
         MATCH (e:Entity {file_path: $file_path, machine_id: $machine_id})
         DETACH DELETE e
         """
+        file_query = """
+        MATCH (f:File {path: $file_path, machine_id: $machine_id})
+        DETACH DELETE f
+        """
         with self._driver.session() as session:
             session.run(query, file_path=file_path, machine_id=machine_id)
+            session.run(file_query, file_path=file_path, machine_id=machine_id)
+            self._prune_orphans(session, machine_id)
 
     def delete_machine(self, machine_id: str) -> None:
-        """Remove all entities for a machine."""
+        """Remove all graph nodes for a machine."""
         query = """
-        MATCH (e:Entity {machine_id: $machine_id})
-        DETACH DELETE e
+        MATCH (n {machine_id: $machine_id})
+        DETACH DELETE n
         """
         with self._driver.session() as session:
             session.run(query, machine_id=machine_id)
+
+    @staticmethod
+    def _prune_orphans(session: neo4j.Session, machine_id: str) -> None:
+        session.run(
+            """
+            MATCH (n {machine_id: $machine_id})
+            WHERE (n:Module OR n:UnresolvedSymbol) AND NOT (n)--()
+            DELETE n
+            """,
+            machine_id=machine_id,
+        )
 
     def get_dependencies(
         self,
@@ -144,52 +231,61 @@ class MemgraphCodeGraph:
         direction: upstream (who calls me), downstream (who I call), both.
         """
         results = {"nodes": [], "edges": []}
-
         params: dict[str, Any] = {"name": entity_name}
         if machine_id:
             params["machine_id"] = machine_id
+        if project:
+            params["project"] = project
 
-        if direction in ("upstream", "both"):
-            query = """
-            MATCH (caller)-[:DEPENDS_ON]->(target:Entity {name: $name})
-            """
-            if machine_id:
-                query += " WHERE caller.machine_id = $machine_id AND target.machine_id = $machine_id"
-            query += " RETURN caller, target"
-            with self._driver.session() as session:
-                for record in session.run(query, **params):
+        with self._driver.session() as session:
+            if direction in ("upstream", "both"):
+                upstream_query = """
+                MATCH (caller:Entity)-[r:DEPENDS_ON|CALLS_SYNTAX]->(target {name: $name})
+                """
+                conditions = []
+                if machine_id:
+                    conditions.append("caller.machine_id = $machine_id AND target.machine_id = $machine_id")
+                if project:
+                    conditions.append("caller.project = $project AND target.project = $project")
+                if conditions:
+                    upstream_query += " WHERE " + " AND ".join(conditions)
+                upstream_query += " RETURN caller, target, type(r) AS relation"
+                for record in session.run(upstream_query, **params):
                     results["nodes"].append(dict(record["caller"]))
                     results["edges"].append(
                         {
-                            "from": record["caller"]["file_path"],
-                            "to": record["target"]["file_path"],
-                            "relation": "DEPENDS_ON",
+                            "from": _node_id(record["caller"]),
+                            "to": _node_id(record["target"]),
+                            "relation": record["relation"],
                         }
                     )
 
-        if direction in ("downstream", "both"):
-            query = """
-            MATCH (source:Entity {name: $name})-[:DEPENDS_ON]->(callee)
-            """
-            if machine_id:
-                query += " WHERE source.machine_id = $machine_id AND callee.machine_id = $machine_id"
-            query += " RETURN source, callee"
-            with self._driver.session() as session:
-                for record in session.run(query, **params):
-                    results["nodes"].append(dict(record["callee"]))
+            if direction in ("downstream", "both"):
+                downstream_query = """
+                MATCH (source:Entity {name: $name})-[r:DEPENDS_ON|CALLS_SYNTAX]->(target)
+                """
+                conditions = []
+                if machine_id:
+                    conditions.append("source.machine_id = $machine_id AND target.machine_id = $machine_id")
+                if project:
+                    conditions.append("source.project = $project AND target.project = $project")
+                if conditions:
+                    downstream_query += " WHERE " + " AND ".join(conditions)
+                downstream_query += " RETURN source, target, type(r) AS relation"
+                for record in session.run(downstream_query, **params):
+                    results["nodes"].append(dict(record["target"]))
                     results["edges"].append(
                         {
-                            "from": record["source"]["file_path"],
-                            "to": record["callee"]["file_path"],
-                            "relation": "DEPENDS_ON",
+                            "from": _node_id(record["source"]),
+                            "to": _node_id(record["target"]),
+                            "relation": record["relation"],
                         }
                     )
 
-        # Deduplicate nodes
         seen = set()
         unique_nodes = []
         for n in results["nodes"]:
-            key = (n.get("file_path"), n.get("machine_id"))
+            key = (_node_id(n), n.get("machine_id"))
             if key not in seen:
                 seen.add(key)
                 unique_nodes.append(n)
@@ -222,7 +318,7 @@ class MemgraphCodeGraph:
             entity_query += f" WHERE {entity_where}"
         entity_query += " RETURN count(e) AS count"
 
-        edge_query = "MATCH (a:Entity)-[r]->(b:Entity)"
+        edge_query = "MATCH (a)-[r]->(b)"
         if relation_where:
             edge_query += f" WHERE {relation_where}"
         edge_query += " RETURN count(r) AS count"

@@ -12,7 +12,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
-from api_server.main import _build_embedding_chunks, _collect_stats, _slice_symbol_chunk, _verify_auth
+from api_server.main import _build_embedding_chunks, _collect_stats, _handle_delete, _handle_upserts, _slice_symbol_chunk, _verify_auth
 from db.content_store import ContentStore
 from db.qdrant_client import QdrantCodeStore
 from db.memgraph_client import MemgraphCodeGraph
@@ -147,6 +147,121 @@ def test_build_embedding_chunks_by_symbol_range():
     assert "func alpha()" in chunks[0]["snippet"]
     assert chunks[1]["entity"] == "beta"
     assert "func beta()" in chunks[1]["snippet"]
+
+
+class _FakeMemgraph:
+    def __init__(self):
+        self.entities = None
+        self.relations = None
+        self.deleted = []
+
+    def delete_file(self, file_path, machine_id):
+        self.deleted.append((file_path, machine_id))
+
+    def upsert_entities(self, entities):
+        self.entities = entities
+
+    def upsert_relations(self, relations):
+        self.relations = relations
+
+
+class _FakeContent:
+    def __init__(self):
+        self.files = None
+        self.refreshed = None
+        self.deleted = []
+
+    def upsert_files(self, files):
+        self.files = files
+
+    def delete_file(self, machine_id, file_path):
+        self.deleted.append((machine_id, file_path))
+
+    def refresh_project_tree(self, machine_id, project):
+        self.refreshed = (machine_id, project)
+
+
+class _FakeQdrant:
+    def __init__(self):
+        self.deleted = []
+
+    def delete_by_file(self, file_path, machine_id):
+        self.deleted.append((file_path, machine_id))
+
+    def upsert(self, vectors, payloads):
+        pass
+
+
+class _FakeHTTP:
+    async def post(self, *args, **kwargs):
+        raise RuntimeError("skip embeddings")
+
+
+def test_handle_upserts_passes_graph_relations():
+    memgraph = _FakeMemgraph()
+    qdrant = _FakeQdrant()
+    content = _FakeContent()
+    ev = FileEvent(
+        type="CREATE",
+        path="/src/main.go",
+        project="demo",
+        machine_id="m1",
+        timestamp=1,
+        content="package main\nfunc main() { helper() }\n",
+        content_hash="abc",
+        entities=[Entity(name="main", type="function", line=2, start_line=2, end_line=2)],
+        relations=[
+            {"type": "CONTAINS", "target": "main", "target_type": "function", "line": 2, "confidence": "syntax"},
+            {"type": "CALLS_SYNTAX", "source": "main", "target": "helper", "target_type": "symbol", "line": 2, "confidence": "syntax"},
+            {"type": "IMPORTS", "target": "fmt", "target_type": "module", "line": 1, "confidence": "syntax"},
+        ],
+    )
+
+    import asyncio
+    asyncio.run(_handle_upserts([ev], "m1", "demo", qdrant, memgraph, content, _FakeHTTP()))
+
+    assert qdrant.deleted == [("/src/main.go", "m1")]
+    assert memgraph.deleted == [("/src/main.go", "m1")]
+    assert memgraph.entities == [
+        {
+            "machine_id": "m1",
+            "project": "demo",
+            "file_path": "/src/main.go",
+            "name": "main",
+            "type": "function",
+            "content_hash": "abc",
+            "start_line": 2,
+            "end_line": 2,
+        }
+    ]
+    assert memgraph.relations == [
+        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "CONTAINS", "source": "", "target": "main", "target_type": "function", "line": 2, "confidence": "syntax"},
+        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "CALLS_SYNTAX", "source": "main", "target": "helper", "target_type": "symbol", "line": 2, "confidence": "syntax"},
+        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "IMPORTS", "source": "", "target": "fmt", "target_type": "module", "line": 1, "confidence": "syntax"},
+    ]
+    assert content.files == [("m1", "demo", "/src/main.go", "package main\nfunc main() { helper() }\n")]
+    assert content.refreshed == ("m1", "demo")
+
+
+def test_handle_delete_cleans_rename_paths():
+    qdrant = _FakeQdrant()
+    memgraph = _FakeMemgraph()
+    content = _FakeContent()
+    ev = FileEvent(
+        type="RENAME",
+        path="/src/new.go",
+        old_path="/src/old.go",
+        project="demo",
+        machine_id="m1",
+        timestamp=1,
+    )
+
+    _handle_delete(ev, qdrant, memgraph, content, "fallback-machine", "fallback-project")
+
+    assert qdrant.deleted == [("/src/new.go", "m1"), ("/src/old.go", "m1")]
+    assert memgraph.deleted == [("/src/new.go", "m1"), ("/src/old.go", "m1")]
+    assert content.deleted == [("m1", "/src/new.go"), ("m1", "/src/old.go")]
+    assert content.refreshed == ("m1", "demo")
 
 
 class _FakeStatsClient:
@@ -308,6 +423,52 @@ def test_memgraph():
     deps = graph.get_dependencies("main", direction="downstream", machine_id=machine_id)
     assert len(deps["edges"]) >= 1
     print(f"[test] memgraph downstream OK: {len(deps['edges'])} edges")
+
+    print("[test] memgraph syntax relations ...")
+    graph.upsert_entities(
+        [
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "name": "GraphMain",
+                "type": "function",
+                "content_hash": "ghi789",
+                "start_line": 3,
+                "end_line": 6,
+            }
+        ]
+    )
+    graph.upsert_relations(
+        [
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "type": "IMPORTS",
+                "source": "",
+                "target": "fmt",
+                "target_type": "module",
+                "line": 3,
+                "confidence": "syntax",
+            },
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "type": "CALLS_SYNTAX",
+                "source": "GraphMain",
+                "target": "fmt.Println",
+                "target_type": "symbol",
+                "line": 4,
+                "confidence": "syntax",
+            },
+        ]
+    )
+    graph_deps = graph.get_dependencies("GraphMain", direction="downstream", machine_id=machine_id)
+    assert any(edge["relation"] == "CALLS_SYNTAX" and edge["to"] == "fmt.Println" for edge in graph_deps["edges"]), graph_deps
+    stats = graph.stats(machine_id=machine_id, project=project)
+    assert stats["edges"] >= 3, stats
 
     print("[test] memgraph tombstone ...")
     graph.delete_file("/src/utils.go", machine_id)

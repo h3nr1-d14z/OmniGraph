@@ -29,11 +29,15 @@ var languageMap = map[string]*sitter.Language{
 
 // ExtractSymbols parses a file and extracts code entities.
 func ExtractSymbols(path string, content []byte) ([]models.Entity, error) {
+	entities, _, err := ExtractGraph(path, content)
+	return entities, err
+}
+
+func ExtractGraph(path string, content []byte) ([]models.Entity, []models.Relation, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	lang := languageMap[ext]
 	if lang == nil {
-		// Fallback: no AST extraction for unsupported languages
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	parser := sitter.NewParser()
@@ -43,7 +47,8 @@ func ExtractSymbols(path string, content []byte) ([]models.Entity, error) {
 
 	var entities []models.Entity
 	walkTree(root, content, ext, &entities)
-	return entities, nil
+	relations := extractRelations(root, content, ext, entities)
+	return entities, relations, nil
 }
 
 func walkTree(node *sitter.Node, content []byte, ext string, out *[]models.Entity) {
@@ -118,6 +123,116 @@ func extractPython(node *sitter.Node, content []byte, out *[]models.Entity) {
 	case "class_definition":
 		appendEntity(node, content, out, "class")
 	}
+}
+
+func extractRelations(root *sitter.Node, content []byte, ext string, entities []models.Entity) []models.Relation {
+	relations := make([]models.Relation, 0, len(entities))
+	for _, ent := range entities {
+		relations = append(relations, models.Relation{
+			Type:       "CONTAINS",
+			Target:     ent.Name,
+			TargetType: ent.Type,
+			Line:       ent.Line,
+			Confidence: "syntax",
+		})
+	}
+
+	if ext == ".go" {
+		extractGoRelations(root, content, &relations)
+	}
+	return relations
+}
+
+func extractGoRelations(node *sitter.Node, content []byte, out *[]models.Relation) {
+	if node == nil {
+		return
+	}
+
+	switch node.Type() {
+	case "import_spec":
+		if target := goImportTarget(node, content); target != "" {
+			*out = append(*out, models.Relation{
+				Type:       "IMPORTS",
+				Target:     target,
+				TargetType: "module",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: "syntax",
+			})
+		}
+	case "function_declaration", "method_declaration":
+		source := nodeName(node, content)
+		if source != "" {
+			extractGoCallRelations(node, content, source, out)
+		}
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractGoRelations(node.Child(i), content, out)
+	}
+}
+
+func goImportTarget(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "interpreted_string_literal" || child.Type() == "raw_string_literal" {
+			return strings.Trim(string(child.Content(content)), "`\"")
+		}
+	}
+	return ""
+}
+
+func extractGoCallRelations(node *sitter.Node, content []byte, source string, out *[]models.Relation) {
+	if node == nil {
+		return
+	}
+	if node.Type() == "call_expression" {
+		if target := goCallTarget(node, content); target != "" {
+			*out = append(*out, models.Relation{
+				Type:       "CALLS_SYNTAX",
+				Source:     source,
+				Target:     target,
+				TargetType: "symbol",
+				Line:       int(node.StartPoint().Row) + 1,
+				Confidence: "syntax",
+			})
+		}
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		extractGoCallRelations(node.Child(i), content, source, out)
+	}
+}
+
+func goCallTarget(node *sitter.Node, content []byte) string {
+	function := node.ChildByFieldName("function")
+	if function == nil {
+		return ""
+	}
+	return selectorName(function, content)
+}
+
+func selectorName(node *sitter.Node, content []byte) string {
+	switch node.Type() {
+	case "identifier", "field_identifier", "qualified_type":
+		return string(node.Content(content))
+	case "selector_expression":
+		operand := selectorName(node.ChildByFieldName("operand"), content)
+		field := selectorName(node.ChildByFieldName("field"), content)
+		if operand != "" && field != "" {
+			return operand + "." + field
+		}
+		if field != "" {
+			return field
+		}
+	}
+	return strings.TrimSpace(string(node.Content(content)))
+}
+
+func nodeName(node *sitter.Node, content []byte) string {
+	name := node.ChildByFieldName("name")
+	if name == nil {
+		return ""
+	}
+	return string(name.Content(content))
 }
 
 // ExtractFileSymbols is a convenience wrapper that reads the file then extracts.

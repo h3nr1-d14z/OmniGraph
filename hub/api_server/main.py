@@ -63,8 +63,8 @@ async def receive_batch(batch: BatchIn, request: Request):
     content: ContentStore = request.app.state.content
 
     events = [FileEvent(**ev_raw) for ev_raw in batch.events]
-    deletes = [ev for ev in events if ev.type == "DELETE"]
-    upserts = [ev for ev in events if ev.type != "DELETE"]
+    deletes = [ev for ev in events if ev.type in ("DELETE", "RENAME")]
+    upserts = [ev for ev in events if ev.type not in ("DELETE", "RENAME")]
 
     for ev in deletes:
         _handle_delete(ev, qdrant, memgraph, content, batch.machine_id, batch.project)
@@ -152,6 +152,7 @@ async def _handle_upserts(
 ) -> None:
     files: list[tuple[str, str, str, str]] = []
     entities: list[dict] = []
+    relations: list[dict] = []
     chunks: list[dict[str, str | int]] = []
 
     for ev in events:
@@ -166,14 +167,35 @@ async def _handle_upserts(
                     "name": ent.name,
                     "type": ent.type,
                     "content_hash": ev.content_hash or "",
+                    "start_line": ent.start_line or 0,
+                    "end_line": ent.end_line or 0,
                 }
                 for ent in ev.entities
+            )
+        if ev.relations:
+            relations.extend(
+                {
+                    "machine_id": machine_id,
+                    "project": project,
+                    "file_path": ev.path,
+                    "type": rel.type,
+                    "source": rel.source or "",
+                    "target": rel.target,
+                    "target_type": rel.target_type or "",
+                    "line": rel.line or 0,
+                    "confidence": rel.confidence or "syntax",
+                }
+                for rel in ev.relations
             )
         if ev.content and len(ev.content) < 100_000:
             chunks.extend(_build_embedding_chunks(ev, machine_id, project))
 
     content.upsert_files(files)
+    for _, _, file_path, _ in files:
+        memgraph.delete_file(file_path, machine_id)
+        qdrant.delete_by_file(file_path, machine_id)
     memgraph.upsert_entities(entities)
+    memgraph.upsert_relations(relations)
     if files:
         content.refresh_project_tree(machine_id, project)
 
@@ -201,8 +223,6 @@ async def _handle_upserts(
             }
             for chunk in chunks
         ]
-        for _, _, file_path, _ in files:
-            qdrant.delete_by_file(file_path, machine_id)
         qdrant.upsert(vectors=vectors, payloads=payloads)
     except Exception as exc:
         print(f"[hub] batch embed failed: {exc}")
@@ -218,9 +238,13 @@ def _handle_delete(
 ) -> None:
     machine_id = ev.machine_id or fallback_machine_id
     project = ev.project or fallback_project
-    qdrant.delete_by_file(ev.path, machine_id)
-    memgraph.delete_file(ev.path, machine_id)
-    content.delete_file(machine_id, ev.path)
+    paths = [ev.path]
+    if ev.old_path and ev.old_path != ev.path:
+        paths.append(ev.old_path)
+    for path in paths:
+        qdrant.delete_by_file(path, machine_id)
+        memgraph.delete_file(path, machine_id)
+        content.delete_file(machine_id, path)
     content.refresh_project_tree(machine_id, project)
 
 

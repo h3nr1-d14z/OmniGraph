@@ -146,7 +146,7 @@ func (dw *DebouncedWatcher) handleEvent(evt fsnotify.Event) {
 	case evt.Op&fsnotify.Remove == fsnotify.Remove:
 		etype = models.EventDelete
 	case evt.Op&fsnotify.Rename == fsnotify.Rename:
-		etype = models.EventRename
+		etype = models.EventDelete
 	default:
 		return
 	}
@@ -293,10 +293,11 @@ func (dw *DebouncedWatcher) finalizeEvent(pending pendingEvent) (models.FileEven
 		return models.FileEvent{}, false
 	}
 
-	entities, _ := ExtractSymbols(pending.Path, content)
+	entities, relations, _ := ExtractGraph(pending.Path, content)
 	ev.ContentHash = hash
 	ev.Content = string(content)
 	ev.Entities = entities
+	ev.Relations = relations
 	return ev, true
 }
 

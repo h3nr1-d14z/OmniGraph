@@ -11,6 +11,15 @@ class Entity(BaseModel):
     end_line: int | None = None
 
 
+class Relation(BaseModel):
+    type: str
+    source: str | None = None
+    target: str
+    target_type: str | None = None
+    line: int | None = None
+    confidence: str | None = None
+
+
 class FileEvent(BaseModel):
     type: str
     path: str
@@ -21,6 +30,7 @@ class FileEvent(BaseModel):
     content_hash: str | None = None
     content: str | None = None
     entities: list[Entity] | None = None
+    relations: list[Relation] | None = None
 
 
 class BatchPayload(BaseModel):
