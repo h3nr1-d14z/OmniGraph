@@ -1,0 +1,93 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: omnigraph-qdrant
+    restart: unless-stopped
+    mem_limit: ${QDRANT_MEM_LIMIT:-4g}
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__STORAGE__ON_DISK_PAYLOAD=${QDRANT_ON_DISK:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  memgraph:
+    image: memgraph/memgraph:latest
+    container_name: omnigraph-memgraph
+    restart: unless-stopped
+    mem_limit: ${MEMGRAPH_MEM_LIMIT:-4g}
+    ports:
+      - "${MEMGRAPH_BOLT_PORT:-7687}:7687"
+    volumes:
+      - memgraph_data:/var/lib/memgraph
+    command: >
+      --log-level=INFO
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'RETURN 1;\n' | mgconsole --host 127.0.0.1 --port 7687 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  embed-service:
+    build:
+      context: ./hub/embed_service
+      dockerfile: Dockerfile
+    container_name: omnigraph-embed
+    restart: unless-stopped
+    ports:
+      - "${EMBED_SERVICE_PORT:-8000}:8000"
+    environment:
+      - EMBED_BACKEND=${EMBED_BACKEND:-auto}
+      - EMBED_WORKERS=${EMBED_WORKERS:-1}
+      - EMBED_BATCH_SIZE=${EMBED_BATCH_SIZE:-32}
+      - EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-nomic-ai/nomic-embed-text-v1.5}
+      - MODEL_CACHE=/models
+    volumes:
+      - model_cache:/models
+    mem_limit: ${EMBED_SERVICE_MEM_LIMIT:-4g}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=10)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
+  hub-api:
+    build:
+      context: ./hub
+      dockerfile: api_server/Dockerfile
+    container_name: omnigraph-hub-api
+    restart: unless-stopped
+    ports:
+      - "${HUB_API_PORT:-9000}:9000"
+    environment:
+      - HUB_AUTH_TOKEN=${HUB_AUTH_TOKEN:-changeme}
+      - EMBED_SERVICE_URL=http://embed-service:8000
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - MEMGRAPH_URI=bolt://memgraph:7687
+    mem_limit: ${HUB_API_MEM_LIMIT:-2g}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      memgraph:
+        condition: service_healthy
+      embed-service:
+        condition: service_healthy
+
+volumes:
+  qdrant_storage:
+  memgraph_data:
+  model_cache:

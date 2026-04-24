@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+httpx
+pydantic
+qdrant-client>=1.8.0
+neo4j>=5.18.0

@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Go/build artifacts
+bin/
+watcher/bin/
+*.exe
+*.test
+coverage.out
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+credentials*.json
+secrets*.json
+
+# Local agent/tool state
+.claude/
+.omc/
+
+# Local databases and caches
+*.db
+*.sqlite
+*.sqlite3
+/models/
+/model_cache/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
