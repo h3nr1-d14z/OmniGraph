@@ -34,8 +34,10 @@ docker compose up -d embed-service
 ### 4. Test
 
 ```bash
-cd tests
-python test_hub_e2e.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
+(cd watcher && go test ./...)
 ```
 
 ## Architecture

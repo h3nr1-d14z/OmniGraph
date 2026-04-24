@@ -106,20 +106,10 @@ class QdrantCodeStore:
         machine_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        conditions: list[Any] = []
-        if project_scope:
-            conditions.append(
-                FieldCondition(key="project", match=MatchValue(value=project_scope))
-            )
-        if machine_id:
-            conditions.append(
-                FieldCondition(key="machine_id", match=MatchValue(value=machine_id))
-            )
-
         results = self.client.query_points(
             collection_name=self.collection,
             query=query_vector,
-            query_filter=Filter(must=conditions) if conditions else None,
+            query_filter=self._build_filter(machine_id=machine_id, project=project_scope),
             limit=limit,
             with_payload=True,
         )
@@ -156,3 +146,39 @@ class QdrantCodeStore:
                 ]
             ),
         )
+
+    def stats(
+        self,
+        machine_id: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        count_filter = self._build_filter(machine_id=machine_id, project=project)
+        exact = os.getenv("QDRANT_STATS_EXACT", "false").lower() == "true"
+        if count_filter is not None:
+            exact = exact or os.getenv("QDRANT_STATS_SCOPED_EXACT", "true").lower() == "true"
+        result = self.client.count(
+            collection_name=self.collection,
+            count_filter=count_filter,
+            exact=exact,
+        )
+        return {
+            "collection": self.collection,
+            "points": int(result.count),
+            "exact": exact,
+        }
+
+    @staticmethod
+    def _build_filter(
+        machine_id: str | None = None,
+        project: str | None = None,
+    ) -> Filter | None:
+        conditions: list[Any] = []
+        if project:
+            conditions.append(
+                FieldCondition(key="project", match=MatchValue(value=project))
+            )
+        if machine_id:
+            conditions.append(
+                FieldCondition(key="machine_id", match=MatchValue(value=machine_id))
+            )
+        return Filter(must=conditions) if conditions else None

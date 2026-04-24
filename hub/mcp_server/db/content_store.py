@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 # Module-level singleton
 _store_instance: "ContentStore | None" = None
@@ -226,6 +227,44 @@ class ContentStore:
             }
             for row_machine_id, row_project, file_path, content, rank in rows
         ]
+
+    def stats(
+        self,
+        machine_id: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, Any]:
+        filters: list[str] = []
+        params: list[str] = []
+        if machine_id:
+            filters.append("machine_id = ?")
+            params.append(machine_id)
+        if project:
+            filters.append("project = ?")
+            params.append(project)
+
+        files_count = self._count_rows("files", filters, params)
+        project_trees_count = self._count_rows("project_trees", filters, params)
+        fts_rows_count = self._count_rows("files_fts", filters, params)
+
+        return {
+            "db_path": self.db_path,
+            "files": files_count,
+            "project_trees": project_trees_count,
+            "global_query_embeddings": self._count_query_embeddings(),
+            "fts_rows": fts_rows_count,
+        }
+
+    def _count_rows(self, table: str, filters: list[str], params: list[str]) -> int:
+        where = f" WHERE {' AND '.join(filters)}" if filters else ""
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {table}{where}",
+            params,
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def _count_query_embeddings(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM query_embeddings").fetchone()
+        return int(row[0]) if row else 0
 
 
 def _fts_query(query: str) -> str:

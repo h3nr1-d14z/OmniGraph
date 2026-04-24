@@ -224,6 +224,51 @@ def _handle_delete(
     content.refresh_project_tree(machine_id, project)
 
 
+def _collect_stats(
+    content: ContentStore,
+    qdrant: QdrantCodeStore,
+    memgraph: MemgraphCodeGraph,
+    machine_id: str | None = None,
+    project: str | None = None,
+) -> dict:
+    scope = {"machine_id": machine_id, "project": project}
+    response = {
+        "status": "ok",
+        "scope": {key: value for key, value in scope.items() if value is not None},
+        "content_store": None,
+        "qdrant": None,
+        "memgraph": None,
+        "errors": {},
+    }
+
+    components = {
+        "content_store": content,
+        "qdrant": qdrant,
+        "memgraph": memgraph,
+    }
+    for name, client in components.items():
+        try:
+            response[name] = client.stats(machine_id=machine_id, project=project)
+        except Exception as exc:
+            print(f"[hub] stats {name} failed: {exc}")
+            response["status"] = "degraded"
+            response["errors"][name] = "unavailable"
+
+    return response
+
+
+@app.get("/stats")
+async def stats(request: Request, machine_id: str | None = None, project: str | None = None):
+    _verify_auth(request)
+    return _collect_stats(
+        content=request.app.state.content,
+        qdrant=request.app.state.qdrant,
+        memgraph=request.app.state.memgraph,
+        machine_id=machine_id,
+        project=project,
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

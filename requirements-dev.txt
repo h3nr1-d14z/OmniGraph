@@ -1,0 +1,5 @@
+-r hub/api_server/requirements.txt
+-r hub/embed_service/requirements.txt
+-r hub/mcp_server/requirements.txt
+
+pytest>=8.0.0

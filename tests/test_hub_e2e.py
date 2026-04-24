@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hub"))
 
 import httpx
 import pytest
-from api_server.main import _build_embedding_chunks, _slice_symbol_chunk
+from fastapi import HTTPException
+from starlette.requests import Request
+from api_server.main import _build_embedding_chunks, _collect_stats, _slice_symbol_chunk, _verify_auth
 from db.content_store import ContentStore
 from db.qdrant_client import QdrantCodeStore
 from db.memgraph_client import MemgraphCodeGraph
@@ -91,6 +93,34 @@ def test_content_store_refresh_project_tree(tmp_path):
     assert "util.go" not in tree
 
 
+def test_content_store_stats_respects_scope(tmp_path):
+    store = ContentStore(str(tmp_path / "content.db"))
+    store.upsert_files(
+        [
+            ("m1", "alpha", "/workspace/alpha/src/main.go", "package main"),
+            ("m1", "beta", "/workspace/beta/src/util.go", "package beta"),
+            ("m2", "alpha", "/workspace/alpha/src/worker.go", "package worker"),
+        ]
+    )
+    store.refresh_project_tree("m1", "alpha")
+    store.refresh_project_tree("m1", "beta")
+    store.refresh_project_tree("m2", "alpha")
+    store.upsert_query_embedding("query:alpha", [0.1, 0.2])
+
+    all_stats = store.stats()
+    assert all_stats["files"] == 3
+    assert all_stats["project_trees"] == 3
+    assert all_stats["global_query_embeddings"] == 1
+    assert all_stats["fts_rows"] == 3
+    assert all_stats["db_path"].endswith("content.db")
+
+    scoped_stats = store.stats(machine_id="m1", project="alpha")
+    assert scoped_stats["files"] == 1
+    assert scoped_stats["project_trees"] == 1
+    assert scoped_stats["fts_rows"] == 1
+    assert scoped_stats["global_query_embeddings"] == 1
+
+
 def test_slice_symbol_chunk_uses_precomputed_lines():
     lines = ["package main", "", "func alpha() {}"]
     assert _slice_symbol_chunk(lines, 3, 3) == "func alpha() {}"
@@ -117,6 +147,105 @@ def test_build_embedding_chunks_by_symbol_range():
     assert "func alpha()" in chunks[0]["snippet"]
     assert chunks[1]["entity"] == "beta"
     assert "func beta()" in chunks[1]["snippet"]
+
+
+class _FakeStatsClient:
+    def __init__(self, result=None, error: Exception | None = None):
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def stats(self, machine_id: str | None = None, project: str | None = None):
+        self.calls.append((machine_id, project))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_collect_stats_isolates_component_errors():
+    content = _FakeStatsClient(result={"files": 2})
+    qdrant = _FakeStatsClient(error=RuntimeError("qdrant unavailable"))
+    memgraph = _FakeStatsClient(result={"entities": 3, "edges": 4})
+
+    stats = _collect_stats(
+        content=content,
+        qdrant=qdrant,
+        memgraph=memgraph,
+        machine_id="m1",
+        project="demo",
+    )
+
+    assert stats["status"] == "degraded"
+    assert stats["scope"] == {"machine_id": "m1", "project": "demo"}
+    assert stats["content_store"] == {"files": 2}
+    assert stats["qdrant"] is None
+    assert stats["memgraph"] == {"entities": 3, "edges": 4}
+    assert stats["errors"] == {"qdrant": "unavailable"}
+    assert content.calls == [("m1", "demo")]
+    assert qdrant.calls == [("m1", "demo")]
+    assert memgraph.calls == [("m1", "demo")]
+
+
+def test_verify_auth_requires_bearer_auth():
+    request = Request({"type": "http", "headers": []})
+    with pytest.raises(HTTPException) as excinfo:
+        _verify_auth(request)
+    assert excinfo.value.status_code == 401
+    assert excinfo.value.detail == "Missing bearer token"
+
+
+def test_collect_stats_returns_scoped_stats():
+    content = _FakeStatsClient(result={"files": 2})
+    qdrant = _FakeStatsClient(result={"points": 5, "exact": False})
+    memgraph = _FakeStatsClient(result={"entities": 3, "edges": 4})
+
+    stats = _collect_stats(
+        content=content,
+        qdrant=qdrant,
+        memgraph=memgraph,
+        machine_id="m1",
+        project="demo",
+    )
+
+    assert stats == {
+        "status": "ok",
+        "scope": {"machine_id": "m1", "project": "demo"},
+        "content_store": {"files": 2},
+        "qdrant": {"points": 5, "exact": False},
+        "memgraph": {"entities": 3, "edges": 4},
+        "errors": {},
+    }
+
+
+class _FakeQdrantCountResult:
+    count = 7
+
+
+class _FakeQdrantClient:
+    def __init__(self):
+        self.calls = []
+
+    def count(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeQdrantCountResult()
+
+
+def test_qdrant_stats_uses_exact_for_scoped_counts(monkeypatch):
+    monkeypatch.setenv("QDRANT_STATS_EXACT", "false")
+    monkeypatch.setenv("QDRANT_STATS_SCOPED_EXACT", "true")
+    store = object.__new__(QdrantCodeStore)
+    store.collection = "test"
+    store.client = _FakeQdrantClient()
+
+    unscoped = store.stats()
+    scoped = store.stats(machine_id="m1", project="demo")
+
+    assert unscoped == {"collection": "test", "points": 7, "exact": False}
+    assert scoped == {"collection": "test", "points": 7, "exact": True}
+    assert store.client.calls[0]["exact"] is False
+    assert store.client.calls[0]["count_filter"] is None
+    assert store.client.calls[1]["exact"] is True
+    assert store.client.calls[1]["count_filter"] is not None
 
 
 def test_qdrant(vectors):

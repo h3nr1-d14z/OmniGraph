@@ -72,6 +72,8 @@ services:
       - EMBED_SERVICE_URL=http://embed-service:8000
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_STATS_EXACT=${QDRANT_STATS_EXACT:-false}
+      - QDRANT_STATS_SCOPED_EXACT=${QDRANT_STATS_SCOPED_EXACT:-true}
       - MEMGRAPH_URI=bolt://memgraph:7687
       - CONTENT_DB_PATH=/data/hub-content.db
     volumes:

@@ -207,3 +207,51 @@ class MemgraphCodeGraph:
         with self._driver.session() as session:
             result = session.run(query, machine_id=machine_id, project=project)
             return [record["path"] for record in result]
+
+    def stats(
+        self,
+        machine_id: str | None = None,
+        project: str | None = None,
+    ) -> dict[str, int]:
+        params: dict[str, Any] = {}
+        entity_where = self._scope_where("e", machine_id, project, params)
+        relation_where = self._scope_where("a", machine_id, project, params, partner_alias="b")
+
+        entity_query = "MATCH (e:Entity)"
+        if entity_where:
+            entity_query += f" WHERE {entity_where}"
+        entity_query += " RETURN count(e) AS count"
+
+        edge_query = "MATCH (a:Entity)-[r]->(b:Entity)"
+        if relation_where:
+            edge_query += f" WHERE {relation_where}"
+        edge_query += " RETURN count(r) AS count"
+
+        with self._driver.session() as session:
+            entities = session.run(entity_query, **params).single()["count"]
+            edges = session.run(edge_query, **params).single()["count"]
+
+        return {
+            "entities": entities,
+            "edges": edges,
+        }
+
+    @staticmethod
+    def _scope_where(
+        alias: str,
+        machine_id: str | None,
+        project: str | None,
+        params: dict[str, Any],
+        partner_alias: str | None = None,
+    ) -> str:
+        clauses: list[str] = []
+        aliases = [alias]
+        if partner_alias:
+            aliases.append(partner_alias)
+        if machine_id:
+            params["machine_id"] = machine_id
+            clauses.extend(f"{current}.machine_id = $machine_id" for current in aliases)
+        if project:
+            params["project"] = project
+            clauses.extend(f"{current}.project = $project" for current in aliases)
+        return " AND ".join(clauses)
