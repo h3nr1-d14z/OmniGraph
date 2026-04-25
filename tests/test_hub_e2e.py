@@ -214,6 +214,7 @@ def test_handle_upserts_passes_graph_relations():
             {"type": "CONTAINS", "target": "main", "target_type": "function", "line": 2, "confidence": "syntax"},
             {"type": "CALLS_SYNTAX", "source": "main", "target": "helper", "target_type": "symbol", "line": 2, "confidence": "syntax"},
             {"type": "IMPORTS", "target": "fmt", "target_type": "module", "line": 1, "confidence": "syntax"},
+            {"type": "CALLS_RESOLVED", "source": "main", "target": "fmt.Println", "target_type": "symbol", "line": 2, "confidence": "semantic", "layer": "semantic", "status": "resolved", "symbol_id": "go:fmt.Println", "target_ref": "fmt.Println", "package": "fmt", "language": "go"},
         ],
     )
 
@@ -234,11 +235,27 @@ def test_handle_upserts_passes_graph_relations():
             "end_line": 2,
         }
     ]
-    assert memgraph.relations == [
-        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "CONTAINS", "source": "", "target": "main", "target_type": "function", "line": 2, "confidence": "syntax"},
-        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "CALLS_SYNTAX", "source": "main", "target": "helper", "target_type": "symbol", "line": 2, "confidence": "syntax"},
-        {"machine_id": "m1", "project": "demo", "file_path": "/src/main.go", "type": "IMPORTS", "source": "", "target": "fmt", "target_type": "module", "line": 1, "confidence": "syntax"},
-    ]
+    relations_by_type = {rel["type"]: rel for rel in memgraph.relations}
+    assert set(relations_by_type) == {"CONTAINS", "CALLS_SYNTAX", "IMPORTS", "CALLS_RESOLVED"}
+    assert relations_by_type["IMPORTS"]["layer"] == "syntax"
+    assert relations_by_type["IMPORTS"]["status"] == "observed"
+    assert relations_by_type["CALLS_RESOLVED"] == {
+        "machine_id": "m1",
+        "project": "demo",
+        "file_path": "/src/main.go",
+        "type": "CALLS_RESOLVED",
+        "source": "main",
+        "target": "fmt.Println",
+        "target_type": "symbol",
+        "line": 2,
+        "confidence": "semantic",
+        "layer": "semantic",
+        "status": "resolved",
+        "symbol_id": "go:fmt.Println",
+        "target_ref": "fmt.Println",
+        "package": "fmt",
+        "language": "go",
+    }
     assert content.files == [("m1", "demo", "/src/main.go", "package main\nfunc main() { helper() }\n")]
     assert content.refreshed == ("m1", "demo")
 
@@ -407,7 +424,7 @@ def test_memgraph():
     graph = MemgraphCodeGraph()
     print("[test] memgraph connect OK")
 
-    machine_id = "machine-test-01"
+    machine_id = f"machine-test-{uuid.uuid4().hex}"
     project = "demo"
 
     print("[test] memgraph upsert entities ...")
@@ -463,12 +480,66 @@ def test_memgraph():
                 "line": 4,
                 "confidence": "syntax",
             },
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "type": "IMPORTS_RESOLVED",
+                "source": "",
+                "target": "fmt",
+                "target_type": "module",
+                "line": 3,
+                "confidence": "semantic",
+                "layer": "semantic",
+                "status": "resolved",
+                "symbol_id": "",
+                "target_ref": "fmt",
+                "package": "fmt",
+                "language": "go",
+            },
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "type": "CALLS_RESOLVED",
+                "source": "GraphMain",
+                "target": "fmt.Println",
+                "target_type": "symbol",
+                "line": 4,
+                "confidence": "semantic",
+                "layer": "semantic",
+                "status": "resolved",
+                "symbol_id": "go:fmt.Println",
+                "target_ref": "fmt.Println",
+                "package": "fmt",
+                "language": "go",
+            },
+            {
+                "machine_id": machine_id,
+                "project": project,
+                "file_path": "/src/graph.go",
+                "type": "REFERENCES",
+                "source": "GraphMain",
+                "target": "fmt.Println",
+                "target_type": "symbol",
+                "line": 4,
+                "confidence": "semantic",
+                "layer": "semantic",
+                "status": "resolved",
+                "symbol_id": "go:fmt.Println",
+                "target_ref": "fmt.Println",
+                "package": "fmt",
+                "language": "go",
+            },
         ]
     )
     graph_deps = graph.get_dependencies("GraphMain", direction="downstream", machine_id=machine_id)
     assert any(edge["relation"] == "CALLS_SYNTAX" and edge["to"] == "fmt.Println" for edge in graph_deps["edges"]), graph_deps
+    assert any(edge["relation"] == "CALLS_RESOLVED" and edge["symbol_id"] == "go:fmt.Println" for edge in graph_deps["edges"]), graph_deps
+    assert any(edge["relation"] == "REFERENCES" and edge["to_type"] == "ResolvedSymbol" for edge in graph_deps["edges"]), graph_deps
+    assert any(edge["relation"] == "IMPORTS_RESOLVED" for edge in graph_deps["edges"]), graph_deps
     stats = graph.stats(machine_id=machine_id, project=project)
-    assert stats["edges"] >= 3, stats
+    assert stats["edges"] >= 6, stats
 
     print("[test] memgraph tombstone ...")
     graph.delete_file("/src/utils.go", machine_id)

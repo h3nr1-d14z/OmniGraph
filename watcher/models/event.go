@@ -43,6 +43,12 @@ type Relation struct {
 	TargetType string `json:"target_type,omitempty"`
 	Line       int    `json:"line,omitempty"`
 	Confidence string `json:"confidence,omitempty"`
+	Layer      string `json:"layer,omitempty"`
+	Status     string `json:"status,omitempty"`
+	SymbolID   string `json:"symbol_id,omitempty"`
+	TargetRef  string `json:"target_ref,omitempty"`
+	Package    string `json:"package,omitempty"`
+	Language   string `json:"language,omitempty"`
 }
 
 // BatchPayload is the HTTP request body sent to Hub.

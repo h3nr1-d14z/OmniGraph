@@ -122,7 +122,17 @@ async def _stdio_transport_smoke(content_db_path: Path):
         graph = json.loads(graph_result.data)
         assert graph["summary"]["entity"] == "missing"
         assert graph["summary"]["edge_count"] == 0
-        assert set(graph["groups"]) == {"imports", "calls", "contains", "dependencies", "other"}
+        assert set(graph["groups"]) == {
+            "imports",
+            "imports_resolved",
+            "calls",
+            "calls_syntax",
+            "calls_resolved",
+            "references",
+            "contains",
+            "dependencies",
+            "other",
+        }
         assert graph["nodes"] == []
         assert graph["edges"] == []
 

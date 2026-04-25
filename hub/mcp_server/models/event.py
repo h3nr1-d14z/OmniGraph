@@ -18,6 +18,12 @@ class Relation(BaseModel):
     target_type: str | None = None
     line: int | None = None
     confidence: str | None = None
+    layer: str | None = None
+    status: str | None = None
+    symbol_id: str | None = None
+    target_ref: str | None = None
+    package: str | None = None
+    language: str | None = None
 
 
 class FileEvent(BaseModel):

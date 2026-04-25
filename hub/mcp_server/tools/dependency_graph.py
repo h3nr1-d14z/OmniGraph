@@ -31,7 +31,11 @@ def _build_summary(entity_name: str, direction: str, nodes: list[dict], edges: l
         "node_count": len(nodes),
         "edge_count": len(edges),
         "imports": len(groups["imports"]),
+        "imports_resolved": len(groups["imports_resolved"]),
         "calls": len(groups["calls"]),
+        "calls_syntax": len(groups["calls_syntax"]),
+        "calls_resolved": len(groups["calls_resolved"]),
+        "references": len(groups["references"]),
         "contains": len(groups["contains"]),
         "dependencies": len(groups["dependencies"]),
     }
@@ -40,7 +44,11 @@ def _build_summary(entity_name: str, direction: str, nodes: list[dict], edges: l
 def _group_edges(edges: list[dict]) -> dict[str, list[dict]]:
     groups: dict[str, list[dict]] = {
         "imports": [],
+        "imports_resolved": [],
         "calls": [],
+        "calls_syntax": [],
+        "calls_resolved": [],
+        "references": [],
         "contains": [],
         "dependencies": [],
         "other": [],
@@ -49,8 +57,18 @@ def _group_edges(edges: list[dict]) -> dict[str, list[dict]]:
         relation = edge.get("relation")
         if relation == "IMPORTS":
             groups["imports"].append(edge)
-        elif relation in ("CALLS", "CALLS_SYNTAX"):
+        elif relation == "IMPORTS_RESOLVED":
+            groups["imports"].append(edge)
+            groups["imports_resolved"].append(edge)
+        elif relation == "CALLS_SYNTAX":
             groups["calls"].append(edge)
+            groups["calls_syntax"].append(edge)
+        elif relation in ("CALLS", "CALLS_RESOLVED"):
+            groups["calls"].append(edge)
+            if relation == "CALLS_RESOLVED":
+                groups["calls_resolved"].append(edge)
+        elif relation == "REFERENCES":
+            groups["references"].append(edge)
         elif relation == "CONTAINS":
             groups["contains"].append(edge)
         elif relation == "DEPENDS_ON":

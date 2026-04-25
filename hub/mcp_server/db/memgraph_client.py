@@ -15,7 +15,7 @@ def _node_id(node: Any) -> str:
 
 def _node_kind(node: Any) -> str:
     labels = set(getattr(node, "labels", []))
-    for label in ("Entity", "File", "Module", "UnresolvedSymbol"):
+    for label in ("Entity", "File", "Module", "UnresolvedSymbol", "ResolvedSymbol"):
         if label in labels:
             return label
     return "Node"
@@ -28,13 +28,24 @@ def _node_payload(node: Any) -> dict[str, Any]:
     return data
 
 
-def _edge_payload(source: Any, target: Any, relation: str, line: int | None, confidence: str | None) -> dict[str, Any]:
+def _edge_payload(
+    source: Any,
+    target: Any,
+    relation: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "from": _node_id(source),
         "to": _node_id(target),
         "relation": relation,
-        "line": line,
-        "confidence": confidence,
+        "line": metadata.get("line"),
+        "confidence": metadata.get("confidence"),
+        "layer": metadata.get("layer"),
+        "status": metadata.get("status"),
+        "symbol_id": metadata.get("symbol_id"),
+        "target_ref": metadata.get("target_ref"),
+        "package": metadata.get("package"),
+        "language": metadata.get("language"),
         "from_type": _node_kind(source),
         "to_type": _node_kind(target),
         "file_path": dict(source).get("file_path") or dict(source).get("path"),
@@ -82,6 +93,8 @@ class MemgraphCodeGraph:
             session.run("CREATE INDEX ON :File(path)")
             session.run("CREATE INDEX ON :Module(name)")
             session.run("CREATE INDEX ON :UnresolvedSymbol(name)")
+            session.run("CREATE INDEX ON :ResolvedSymbol(symbol_id)")
+            session.run("CREATE INDEX ON :ResolvedSymbol(name)")
 
     def close(self) -> None:
         self._driver.close()
@@ -162,7 +175,10 @@ class MemgraphCodeGraph:
         if not relations:
             return
         imports = [rel for rel in relations if rel["type"] == "IMPORTS"]
+        imports_resolved = [rel for rel in relations if rel["type"] == "IMPORTS_RESOLVED"]
         calls = [rel for rel in relations if rel["type"] == "CALLS_SYNTAX" and rel.get("source")]
+        calls_resolved = [rel for rel in relations if rel["type"] == "CALLS_RESOLVED" and rel.get("source") and rel.get("symbol_id")]
+        references = [rel for rel in relations if rel["type"] == "REFERENCES" and rel.get("source") and rel.get("symbol_id")]
         contains = [rel for rel in relations if rel["type"] == "CONTAINS"]
         with self._driver.session() as session:
             if imports:
@@ -195,9 +211,89 @@ class MemgraphCodeGraph:
                     MERGE (source)-[r:CALLS_SYNTAX]->(target)
                     SET r.line = rel.line,
                         r.confidence = rel.confidence,
+                        r.layer = rel.layer,
+                        r.status = rel.status,
+                        r.target_ref = rel.target_ref,
+                        r.package = rel.package,
+                        r.language = rel.language,
                         r.updated_at = timestamp()
                     """,
                     relations=calls,
+                )
+            if imports_resolved:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                    SET f.project = rel.project,
+                        f.updated_at = timestamp()
+                    MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
+                    SET m.project = rel.project,
+                        m.language = rel.language,
+                        m.package = rel.package,
+                        m.updated_at = timestamp()
+                    MERGE (f)-[r:IMPORTS_RESOLVED]->(m)
+                    SET r.raw = rel.target,
+                        r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.layer = rel.layer,
+                        r.status = rel.status,
+                        r.target_ref = rel.target_ref,
+                        r.package = rel.package,
+                        r.language = rel.language,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=imports_resolved,
+                )
+            if calls_resolved:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                    MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
+                    SET target.project = rel.project,
+                        target.name = rel.target,
+                        target.package = rel.package,
+                        target.language = rel.language,
+                        target.target_ref = rel.target_ref,
+                        target.updated_at = timestamp()
+                    MERGE (source)-[r:CALLS_RESOLVED]->(target)
+                    SET r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.layer = rel.layer,
+                        r.status = rel.status,
+                        r.symbol_id = rel.symbol_id,
+                        r.target_ref = rel.target_ref,
+                        r.package = rel.package,
+                        r.language = rel.language,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=calls_resolved,
+                )
+            if references:
+                session.run(
+                    """
+                    UNWIND $relations AS rel
+                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                    MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
+                    SET target.project = rel.project,
+                        target.name = rel.target,
+                        target.package = rel.package,
+                        target.language = rel.language,
+                        target.target_ref = rel.target_ref,
+                        target.updated_at = timestamp()
+                    MERGE (source)-[r:REFERENCES]->(target)
+                    SET r.line = rel.line,
+                        r.confidence = rel.confidence,
+                        r.layer = rel.layer,
+                        r.status = rel.status,
+                        r.symbol_id = rel.symbol_id,
+                        r.target_ref = rel.target_ref,
+                        r.package = rel.package,
+                        r.language = rel.language,
+                        r.updated_at = timestamp()
+                    """,
+                    relations=references,
                 )
             if contains:
                 session.run(
@@ -242,7 +338,7 @@ class MemgraphCodeGraph:
         session.run(
             """
             MATCH (n {machine_id: $machine_id})
-            WHERE (n:Module OR n:UnresolvedSymbol) AND NOT (n)--()
+            WHERE (n:Module OR n:UnresolvedSymbol OR n:ResolvedSymbol) AND NOT (n)--()
             DELETE n
             """,
             machine_id=machine_id,
@@ -281,7 +377,7 @@ class MemgraphCodeGraph:
 
             if direction in ("upstream", "both"):
                 upstream_query = """
-                MATCH (source)-[r:DEPENDS_ON|CALLS_SYNTAX|CONTAINS|IMPORTS]->(root:Entity {name: $name})
+                MATCH (source)-[r:DEPENDS_ON|CALLS_SYNTAX|CALLS_RESOLVED|CONTAINS|IMPORTS|IMPORTS_RESOLVED|REFERENCES]->(root:Entity {name: $name})
                 """
                 conditions = []
                 if machine_id:
@@ -290,7 +386,7 @@ class MemgraphCodeGraph:
                     conditions.append("source.project = $project AND root.project = $project")
                 if conditions:
                     upstream_query += " WHERE " + " AND ".join(conditions)
-                upstream_query += " RETURN source, root AS target, type(r) AS relation, r.line AS line, r.confidence AS confidence"
+                upstream_query += " RETURN source, root AS target, type(r) AS relation, properties(r) AS metadata"
                 for record in session.run(upstream_query, **params):
                     results["nodes"].append(_node_payload(record["source"]))
                     results["nodes"].append(_node_payload(record["target"]))
@@ -299,14 +395,13 @@ class MemgraphCodeGraph:
                             record["source"],
                             record["target"],
                             record["relation"],
-                            record.get("line"),
-                            record.get("confidence"),
+                            dict(record.get("metadata") or {}),
                         )
                     )
 
             if direction in ("downstream", "both"):
                 downstream_query = """
-                MATCH (source:Entity {name: $name})-[r:DEPENDS_ON|CALLS_SYNTAX|CONTAINS|IMPORTS]->(target)
+                MATCH (source:Entity {name: $name})-[r:DEPENDS_ON|CALLS_SYNTAX|CALLS_RESOLVED|CONTAINS|IMPORTS|IMPORTS_RESOLVED|REFERENCES]->(target)
                 """
                 conditions = []
                 if machine_id:
@@ -315,7 +410,7 @@ class MemgraphCodeGraph:
                     conditions.append("source.project = $project AND target.project = $project")
                 if conditions:
                     downstream_query += " WHERE " + " AND ".join(conditions)
-                downstream_query += " RETURN source, target, type(r) AS relation, r.line AS line, r.confidence AS confidence"
+                downstream_query += " RETURN source, target, type(r) AS relation, properties(r) AS metadata"
                 for record in session.run(downstream_query, **params):
                     results["nodes"].append(_node_payload(record["source"]))
                     results["nodes"].append(_node_payload(record["target"]))
@@ -324,8 +419,31 @@ class MemgraphCodeGraph:
                             record["source"],
                             record["target"],
                             record["relation"],
-                            record.get("line"),
-                            record.get("confidence"),
+                            dict(record.get("metadata") or {}),
+                        )
+                    )
+
+                import_query = """
+                MATCH (file:File)-[:CONTAINS]->(source:Entity {name: $name})
+                MATCH (file)-[r:IMPORTS|IMPORTS_RESOLVED]->(target)
+                """
+                import_conditions = []
+                if machine_id:
+                    import_conditions.append("file.machine_id = $machine_id AND source.machine_id = $machine_id AND target.machine_id = $machine_id")
+                if project:
+                    import_conditions.append("file.project = $project AND source.project = $project AND target.project = $project")
+                if import_conditions:
+                    import_query += " WHERE " + " AND ".join(import_conditions)
+                import_query += " RETURN file AS source, target, type(r) AS relation, properties(r) AS metadata"
+                for record in session.run(import_query, **params):
+                    results["nodes"].append(_node_payload(record["source"]))
+                    results["nodes"].append(_node_payload(record["target"]))
+                    results["edges"].append(
+                        _edge_payload(
+                            record["source"],
+                            record["target"],
+                            record["relation"],
+                            dict(record.get("metadata") or {}),
                         )
                     )
 

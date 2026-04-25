@@ -184,6 +184,12 @@ async def _handle_upserts(
                     "target_type": rel.target_type or "",
                     "line": rel.line or 0,
                     "confidence": rel.confidence or "syntax",
+                    "layer": rel.layer or "syntax",
+                    "status": rel.status or "observed",
+                    "symbol_id": rel.symbol_id or "",
+                    "target_ref": rel.target_ref or "",
+                    "package": rel.package or "",
+                    "language": rel.language or "",
                 }
                 for rel in ev.relations
             )
