@@ -26,6 +26,8 @@ class DependencyGraphInput(BaseModel):
 class DependencyGraphResult(BaseModel):
     nodes: list[dict]
     edges: list[dict]
+    summary: dict = Field(default_factory=dict)
+    groups: dict[str, list[dict]] = Field(default_factory=dict)
 
 
 class ReadFileInput(BaseModel):

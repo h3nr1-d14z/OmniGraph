@@ -115,6 +115,17 @@ async def _stdio_transport_smoke(content_db_path: Path):
         )
         assert "# OmniGraph" in result.data
 
+        graph_result = await client.call_tool(
+            "get_dependency_graph_tool",
+            {"entity_name": "missing", "direction": "downstream", "machine_id": "local"},
+        )
+        graph = json.loads(graph_result.data)
+        assert graph["summary"]["entity"] == "missing"
+        assert graph["summary"]["edge_count"] == 0
+        assert set(graph["groups"]) == {"imports", "calls", "contains", "dependencies", "other"}
+        assert graph["nodes"] == []
+        assert graph["edges"] == []
+
 
 def test_mcp_server_stdio_transport(tmp_path):
     asyncio.run(_stdio_transport_smoke(tmp_path / "mcp-content.db"))

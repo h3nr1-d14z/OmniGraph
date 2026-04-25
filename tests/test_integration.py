@@ -333,6 +333,11 @@ def test_dependency_graph():
 
     edges = result.edges
     assert len(edges) >= 1, f"expected edges, got {edges}"
+    assert result.summary["entity"] == "GetUserHandler"
+    assert result.summary["direction"] == "downstream"
+    assert result.summary["edge_count"] == len(edges)
+    assert any(node.get("name") == "GetUserHandler" for node in result.nodes), result.nodes
+    assert result.groups["dependencies"], result.groups
     print(f"[test] dependency_graph OK: {len(edges)} downstream edges")
 
 

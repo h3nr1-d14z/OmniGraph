@@ -12,6 +12,35 @@ def _node_id(node: Any) -> str:
     data = dict(node)
     return data.get("file_path") or data.get("path") or data.get("name", "")
 
+
+def _node_kind(node: Any) -> str:
+    labels = set(getattr(node, "labels", []))
+    for label in ("Entity", "File", "Module", "UnresolvedSymbol"):
+        if label in labels:
+            return label
+    return "Node"
+
+
+def _node_payload(node: Any) -> dict[str, Any]:
+    data = dict(node)
+    data["id"] = _node_id(node)
+    data["kind"] = _node_kind(node)
+    return data
+
+
+def _edge_payload(source: Any, target: Any, relation: str, line: int | None, confidence: str | None) -> dict[str, Any]:
+    return {
+        "from": _node_id(source),
+        "to": _node_id(target),
+        "relation": relation,
+        "line": line,
+        "confidence": confidence,
+        "from_type": _node_kind(source),
+        "to_type": _node_kind(target),
+        "file_path": dict(source).get("file_path") or dict(source).get("path"),
+    }
+
+
 # Module-level singleton: one driver per process
 _memgraph_instance: "MemgraphCodeGraph | None" = None
 
@@ -238,31 +267,46 @@ class MemgraphCodeGraph:
             params["project"] = project
 
         with self._driver.session() as session:
+            root_query = "MATCH (root:Entity {name: $name})"
+            root_conditions = []
+            if machine_id:
+                root_conditions.append("root.machine_id = $machine_id")
+            if project:
+                root_conditions.append("root.project = $project")
+            if root_conditions:
+                root_query += " WHERE " + " AND ".join(root_conditions)
+            root_query += " RETURN root"
+            roots = [record["root"] for record in session.run(root_query, **params)]
+            results["nodes"].extend(_node_payload(root) for root in roots)
+
             if direction in ("upstream", "both"):
                 upstream_query = """
-                MATCH (caller:Entity)-[r:DEPENDS_ON|CALLS_SYNTAX]->(target {name: $name})
+                MATCH (source)-[r:DEPENDS_ON|CALLS_SYNTAX|CONTAINS|IMPORTS]->(root:Entity {name: $name})
                 """
                 conditions = []
                 if machine_id:
-                    conditions.append("caller.machine_id = $machine_id AND target.machine_id = $machine_id")
+                    conditions.append("source.machine_id = $machine_id AND root.machine_id = $machine_id")
                 if project:
-                    conditions.append("caller.project = $project AND target.project = $project")
+                    conditions.append("source.project = $project AND root.project = $project")
                 if conditions:
                     upstream_query += " WHERE " + " AND ".join(conditions)
-                upstream_query += " RETURN caller, target, type(r) AS relation"
+                upstream_query += " RETURN source, root AS target, type(r) AS relation, r.line AS line, r.confidence AS confidence"
                 for record in session.run(upstream_query, **params):
-                    results["nodes"].append(dict(record["caller"]))
+                    results["nodes"].append(_node_payload(record["source"]))
+                    results["nodes"].append(_node_payload(record["target"]))
                     results["edges"].append(
-                        {
-                            "from": _node_id(record["caller"]),
-                            "to": _node_id(record["target"]),
-                            "relation": record["relation"],
-                        }
+                        _edge_payload(
+                            record["source"],
+                            record["target"],
+                            record["relation"],
+                            record.get("line"),
+                            record.get("confidence"),
+                        )
                     )
 
             if direction in ("downstream", "both"):
                 downstream_query = """
-                MATCH (source:Entity {name: $name})-[r:DEPENDS_ON|CALLS_SYNTAX]->(target)
+                MATCH (source:Entity {name: $name})-[r:DEPENDS_ON|CALLS_SYNTAX|CONTAINS|IMPORTS]->(target)
                 """
                 conditions = []
                 if machine_id:
@@ -271,21 +315,24 @@ class MemgraphCodeGraph:
                     conditions.append("source.project = $project AND target.project = $project")
                 if conditions:
                     downstream_query += " WHERE " + " AND ".join(conditions)
-                downstream_query += " RETURN source, target, type(r) AS relation"
+                downstream_query += " RETURN source, target, type(r) AS relation, r.line AS line, r.confidence AS confidence"
                 for record in session.run(downstream_query, **params):
-                    results["nodes"].append(dict(record["target"]))
+                    results["nodes"].append(_node_payload(record["source"]))
+                    results["nodes"].append(_node_payload(record["target"]))
                     results["edges"].append(
-                        {
-                            "from": _node_id(record["source"]),
-                            "to": _node_id(record["target"]),
-                            "relation": record["relation"],
-                        }
+                        _edge_payload(
+                            record["source"],
+                            record["target"],
+                            record["relation"],
+                            record.get("line"),
+                            record.get("confidence"),
+                        )
                     )
 
         seen = set()
         unique_nodes = []
         for n in results["nodes"]:
-            key = (_node_id(n), n.get("machine_id"))
+            key = (n.get("id"), n.get("machine_id"))
             if key not in seen:
                 seen.add(key)
                 unique_nodes.append(n)
