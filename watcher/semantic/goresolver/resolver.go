@@ -2,6 +2,7 @@ package goresolver
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
@@ -21,7 +22,16 @@ type Request struct {
 
 type Resolver struct{}
 
-func (Resolver) Resolve(ctx context.Context, req Request) ([]models.Relation, error) {
+func (r Resolver) ResolveStrict(ctx context.Context, req Request) ([]models.Relation, error) {
+	relations, err := r.resolve(ctx, req, true)
+	return relations, err
+}
+
+func (r Resolver) Resolve(ctx context.Context, req Request) ([]models.Relation, error) {
+	return r.resolve(ctx, req, false)
+}
+
+func (Resolver) resolve(ctx context.Context, req Request, strict bool) ([]models.Relation, error) {
 	if filepath.Ext(req.FilePath) != ".go" {
 		return nil, nil
 	}
@@ -55,7 +65,16 @@ func (Resolver) Resolve(ctx context.Context, req Request) ([]models.Relation, er
 		return nil, err
 	}
 	pkg, file, index := packageForFile(pkgs, absFile)
-	if pkg == nil || file == nil || len(pkg.Errors) > 0 {
+	if pkg == nil || file == nil {
+		if strict {
+			return nil, fmt.Errorf("no Go package found for %s", absFile)
+		}
+		return nil, nil
+	}
+	if len(pkg.Errors) > 0 {
+		if strict {
+			return nil, fmt.Errorf("package load errors for %s: %s", absFile, pkg.Errors[0].Msg)
+		}
 		return nil, nil
 	}
 
@@ -138,7 +157,7 @@ func resolvedCalls(pkg *packages.Package, file *ast.File, fileIndex int) []model
 		relations = append(relations, models.Relation{
 			Type:       "CALLS_RESOLVED",
 			Source:     source,
-			Target:     displayName(obj, targetRef),
+			Target:     displayName(obj),
 			TargetType: "symbol",
 			Line:       lineOf(pkg, fileIndex, call.Pos()),
 			Confidence: "semantic",
@@ -193,7 +212,7 @@ func receiverName(typ types.Type) string {
 	return ""
 }
 
-func displayName(obj types.Object, targetRef string) string {
+func displayName(obj types.Object) string {
 	pkg := obj.Pkg()
 	if pkg == nil || pkg.Name() == "" {
 		return obj.Name()
@@ -243,7 +262,7 @@ func astTypeName(expr ast.Expr) string {
 	return ""
 }
 
-func lineOf(pkg *packages.Package, fileIndex int, pos token.Pos) int {
+func lineOf(pkg *packages.Package, _ int, pos token.Pos) int {
 	if pkg.Fset == nil || pos == token.NoPos {
 		return 0
 	}

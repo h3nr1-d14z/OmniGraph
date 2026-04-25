@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/omnigraph/watcher/config"
+	"github.com/omnigraph/watcher/semantic/goresolver"
 	"github.com/omnigraph/watcher/sender"
 	"github.com/omnigraph/watcher/watcher"
 )
@@ -24,6 +27,8 @@ func main() {
 		runInit()
 	case "watch":
 		runWatch()
+	case "semantic":
+		runSemantic()
 	default:
 		usage()
 		os.Exit(1)
@@ -34,12 +39,14 @@ func usage() {
 	fmt.Println("Usage: watcher <command> [options]")
 	fmt.Println("")
 	fmt.Println("Commands:")
-	fmt.Println("  init    Create default config at ~/.config/omnigraph/watcher.yaml")
-	fmt.Println("  watch   Start watching a project directory")
+	fmt.Println("  init      Create default config at ~/.config/omnigraph/watcher.yaml")
+	fmt.Println("  watch     Start watching a project directory")
+	fmt.Println("  semantic  Resolve Go semantic relations for one file and print JSON")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  watcher init")
 	fmt.Println("  watcher watch -config ~/.config/omnigraph/watcher.yaml")
+	fmt.Println("  watcher semantic -root ./my-module -file ./my-module/main.go")
 }
 
 func runInit() {
@@ -64,6 +71,33 @@ func runInit() {
 	}
 	fmt.Printf("Config written to %s\n", path)
 	fmt.Println("Edit watch_root and hub URL before running 'watch'.")
+}
+
+func runSemantic() {
+	fs := flag.NewFlagSet("semantic", flag.ExitOnError)
+	root := fs.String("root", ".", "Go module/project root")
+	filePath := fs.String("file", "", "Go file to resolve")
+	fs.Parse(os.Args[2:])
+
+	if *filePath == "" {
+		fmt.Fprintln(os.Stderr, "semantic requires -file")
+		os.Exit(1)
+	}
+
+	relations, err := (goresolver.Resolver{}).ResolveStrict(context.Background(), goresolver.Request{
+		Root:     *root,
+		FilePath: *filePath,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "semantic resolve error: %v\n", err)
+		os.Exit(1)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(relations); err != nil {
+		fmt.Fprintf(os.Stderr, "semantic encode error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runWatch() {
