@@ -61,6 +61,13 @@ func runInit() {
 	cfg.Hub.BatchSec = 5
 	cfg.Hub.DebounceMs = 3000
 	cfg.Hub.MaxEventsPerSec = 100
+	cfg.Semantic.Enabled = false
+	cfg.Semantic.WorkerCount = 1
+	cfg.Semantic.QueueCapacity = 100
+	cfg.Semantic.TimeoutMs = 3000
+	cfg.Semantic.RetryDelayMs = 500
+	cfg.Semantic.MaxRetries = 3
+	cfg.Semantic.CacheSize = config.DefaultSemanticCacheSize
 	cfg.Ignore.GitIgnore = true
 	cfg.Ignore.DockerIgnore = true
 
@@ -100,6 +107,23 @@ func runSemantic() {
 	}
 }
 
+func normalizeWatchRoot(root string) (string, error) {
+	if root == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = home
+	} else if len(root) > 2 && root[:2] == "~/" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(home, root[2:])
+	}
+	return filepath.Abs(root)
+}
+
 func runWatch() {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	configPath := fs.String("config", "", "Path to watcher config file")
@@ -111,12 +135,12 @@ func runWatch() {
 		os.Exit(1)
 	}
 
-	root := cfg.WatchRoot
-	absPath, err := filepath.Abs(root)
+	root, err := normalizeWatchRoot(cfg.WatchRoot)
 	if err != nil {
-		absPath = root
+		fmt.Fprintf(os.Stderr, "watch root error: %v\n", err)
+		os.Exit(1)
 	}
-	root = absPath
+	cfg.WatchRoot = root
 
 	filter, err := watcher.NewIgnoreFilter(
 		root,

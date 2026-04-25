@@ -11,6 +11,22 @@ import (
 	"github.com/omnigraph/watcher/models"
 )
 
+func TestNormalizeWatchRootExpandsHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("home dir: %v", err)
+	}
+
+	root, err := normalizeWatchRoot("~/Projects/your-repo")
+	if err != nil {
+		t.Fatalf("normalize watch root: %v", err)
+	}
+	want := filepath.Join(home, "Projects", "your-repo")
+	if root != want {
+		t.Fatalf("root = %s, want %s", root, want)
+	}
+}
+
 func TestSemanticCommandFailsForInvalidGoPackage(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "main.go")

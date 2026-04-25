@@ -177,13 +177,13 @@ func (w *Worker) process(parent context.Context, job Job) {
 		return
 	}
 	if err := w.sender.Send(ctx, job, relations); err != nil {
-		w.requeue(job)
+		w.requeue(parent, job)
 		return
 	}
 	w.finish(job)
 }
 
-func (w *Worker) requeue(job Job) {
+func (w *Worker) requeue(ctx context.Context, job Job) {
 	key := jobKey(job)
 	w.mu.Lock()
 	if w.latest[key] != job.ContentHash {
@@ -197,9 +197,20 @@ func (w *Worker) requeue(job Job) {
 		w.mu.Unlock()
 		return
 	}
-	w.pending[key] = job
 	w.mu.Unlock()
-	time.AfterFunc(w.cfg.RetryDelay, w.signal)
+	time.AfterFunc(w.cfg.RetryDelay, func() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		w.mu.Lock()
+		if w.latest[key] == job.ContentHash {
+			w.pending[key] = job
+		}
+		w.mu.Unlock()
+		w.signal()
+	})
 }
 
 func (w *Worker) finish(job Job) {

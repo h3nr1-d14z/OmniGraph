@@ -1,12 +1,15 @@
 package watcher
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/omnigraph/watcher/config"
 	"github.com/omnigraph/watcher/models"
+	semanticworker "github.com/omnigraph/watcher/semantic/worker"
 	"github.com/omnigraph/watcher/sender"
 )
 
@@ -107,6 +111,353 @@ func collectEvents(batches []models.BatchPayload, base string) []models.FileEven
 		}
 	}
 	return events
+}
+
+func waitForTestCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met")
+}
+
+type fakeSemanticResolver struct {
+	mu        sync.Mutex
+	jobs      []semanticworker.Job
+	relations []models.Relation
+	block     chan struct{}
+}
+
+func (f *fakeSemanticResolver) Resolve(ctx context.Context, job semanticworker.Job) ([]models.Relation, error) {
+	f.mu.Lock()
+	f.jobs = append(f.jobs, job)
+	f.mu.Unlock()
+	if f.block != nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-f.block:
+		}
+	}
+	return f.relations, nil
+}
+
+func (f *fakeSemanticResolver) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.jobs)
+}
+
+func TestProjectResolverResolveRootFallsBackToWatchRoot(t *testing.T) {
+	dir := t.TempDir()
+	pr := NewProjectResolver(dir, []string{"go.mod"})
+	if err := pr.Discover(); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	path := filepath.Join(dir, "nested", "main.go")
+	if got := pr.ResolveRoot(path); got != dir {
+		t.Fatalf("resolve root = %s, want %s", got, dir)
+	}
+}
+
+func TestSemanticDisabledByDefaultDoesNotCreateWorker(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
+	cfg.Hub.BatchSec = 60
+	cfg.Hub.BatchSize = 50
+	filter, err := NewIgnoreFilter(dir, false, false, nil)
+	if err != nil {
+		t.Fatalf("ignore filter: %v", err)
+	}
+	client := sender.NewClient("http://127.0.0.1", "test-token", cfg.MachineID)
+	dw, err := NewDebouncedWatcher(cfg, filter, nil, client, nil)
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+	defer dw.Stop()
+
+	if dw.semantic != nil {
+		t.Fatal("semantic worker should be nil when semantic.enabled is false")
+	}
+	dw.enqueueSemantic([]models.FileEvent{{
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "main.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-1",
+		Content:     "package main\nfunc main() {}\n",
+	}})
+}
+
+func TestSemanticEnabledSendsSemanticOnlyBatch(t *testing.T) {
+	dir := t.TempDir()
+	received := &receivedBatches{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload models.BatchPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received.append(payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
+	cfg.Hub.URL = server.URL
+	cfg.Hub.AuthToken = "test-token"
+	cfg.Hub.BatchSec = 60
+	cfg.Hub.BatchSize = 50
+	cfg.Semantic.Enabled = true
+	cfg.Semantic.WorkerCount = 1
+	cfg.Semantic.QueueCapacity = 10
+	cfg.Semantic.TimeoutMs = 1000
+	cfg.Semantic.RetryDelayMs = 10
+	cfg.Semantic.MaxRetries = 1
+	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	resolver := &fakeSemanticResolver{relations: []models.Relation{{Type: "CALLS_RESOLVED", Source: "main", Target: "fmt.Println", SymbolID: "go:fmt.Println"}}}
+	dw := &DebouncedWatcher{
+		cfg:    cfg,
+		client: client,
+		ctx:    context.Background(),
+	}
+	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	dw.semantic.Start(dw.ctx)
+	defer dw.semantic.Stop()
+
+	dw.enqueueSemantic([]models.FileEvent{{
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "main.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-1",
+		Content:     "package main\nfunc main() {}\n",
+	}})
+
+	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 1 })
+	batch := received.snapshot()[0]
+	if batch.Project != "demo" || batch.MachineID != cfg.MachineID {
+		t.Fatalf("unexpected batch scope: %#v", batch)
+	}
+	if len(batch.Events) != 1 {
+		t.Fatalf("expected one semantic event, got %#v", batch.Events)
+	}
+	event := batch.Events[0]
+	if event.Content != "" || len(event.Entities) != 0 || len(event.Relations) != 1 {
+		t.Fatalf("expected semantic-only event, got %#v", event)
+	}
+	if event.ContentHash != "hash-1" || event.Path == "" {
+		t.Fatalf("unexpected semantic event identity: %#v", event)
+	}
+}
+
+func TestSemanticEnqueueLogsWhenQueueIsFull(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
+	cfg.Semantic.WorkerCount = 1
+	cfg.Semantic.QueueCapacity = 1
+	cfg.Semantic.TimeoutMs = 1000
+	cfg.Semantic.RetryDelayMs = 10
+	cfg.Semantic.MaxRetries = 1
+	dw := &DebouncedWatcher{cfg: cfg, ctx: context.Background()}
+	dw.semantic = semanticworker.New(semanticConfig(cfg), &fakeSemanticResolver{block: make(chan struct{})}, semanticBatchSender{client: sender.NewClient("http://127.0.0.1", "test-token", cfg.MachineID)})
+
+	oldStderr := os.Stderr
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = writePipe
+	defer func() { os.Stderr = oldStderr }()
+
+	dw.enqueueSemantic([]models.FileEvent{{
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "one.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-1",
+		Content:     "package main\nfunc one() {}\n",
+	}, {
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "two.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-2",
+		Content:     "package main\nfunc two() {}\n",
+	}})
+	writePipe.Close()
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(readPipe); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if !strings.Contains(buf.String(), "semantic enqueue skipped") {
+		t.Fatalf("expected semantic enqueue warning, got %q", buf.String())
+	}
+}
+
+func TestSemanticRelationCacheHitAndEviction(t *testing.T) {
+	cache := newSemanticRelationCache(1)
+	job1 := semanticworker.Job{Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1"}
+	job2 := semanticworker.Job{Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-2"}
+	relations := []models.Relation{{Type: "CALLS_RESOLVED", Target: "fmt.Println"}}
+
+	cache.put(semanticCacheKey(job1), relations)
+	relations[0].Target = "mutated"
+	cached, ok := cache.get(semanticCacheKey(job1))
+	if !ok || cached[0].Target != "fmt.Println" {
+		t.Fatalf("cache hit returned %#v ok=%v", cached, ok)
+	}
+	cached[0].Target = "mutated-again"
+	cached, ok = cache.get(semanticCacheKey(job1))
+	if !ok || cached[0].Target != "fmt.Println" {
+		t.Fatalf("cache should clone on get, got %#v ok=%v", cached, ok)
+	}
+
+	cache.put(semanticCacheKey(job2), []models.Relation{{Type: "CALLS_RESOLVED", Target: "helper"}})
+	if _, ok := cache.get(semanticCacheKey(job1)); ok {
+		t.Fatal("expected oldest cache entry to be evicted")
+	}
+	if cached, ok := cache.get(semanticCacheKey(job2)); !ok || cached[0].Target != "helper" {
+		t.Fatalf("expected newest cache entry, got %#v ok=%v", cached, ok)
+	}
+}
+
+func TestSemanticRelationCacheCanBeDisabled(t *testing.T) {
+	cache := newSemanticRelationCache(0)
+	job := semanticworker.Job{Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1"}
+	cache.put(semanticCacheKey(job), []models.Relation{{Type: "CALLS_RESOLVED", Target: "fmt.Println"}})
+	if _, ok := cache.get(semanticCacheKey(job)); ok {
+		t.Fatal("expected disabled cache to miss")
+	}
+}
+
+func TestBlockedSemanticResolverDoesNotDelaySyntaxSend(t *testing.T) {
+	dir := t.TempDir()
+	received := &receivedBatches{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload models.BatchPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received.append(payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
+	cfg.Hub.URL = server.URL
+	cfg.Hub.AuthToken = "test-token"
+	cfg.Hub.BatchSec = 60
+	cfg.Hub.BatchSize = 50
+	cfg.Semantic.WorkerCount = 1
+	cfg.Semantic.QueueCapacity = 10
+	cfg.Semantic.TimeoutMs = 1000
+	cfg.Semantic.RetryDelayMs = 10
+	cfg.Semantic.MaxRetries = 1
+	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	resolver := &fakeSemanticResolver{relations: []models.Relation{{Type: "CALLS_RESOLVED", Target: "fmt.Println"}}, block: make(chan struct{})}
+	dw := &DebouncedWatcher{
+		cfg:             cfg,
+		client:          client,
+		lastContentHash: make(map[string]string),
+		ctx:             context.Background(),
+	}
+	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	dw.semantic.Start(dw.ctx)
+	defer dw.semantic.Stop()
+
+	events := []models.FileEvent{{
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "main.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-1",
+		Content:     "package main\nfunc main() {}\n",
+	}}
+	if !dw.sendOrQueue("demo", events) {
+		t.Fatal("syntax send failed")
+	}
+	dw.enqueueSemantic(events)
+
+	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 1 && resolver.count() == 1 })
+	if got := received.snapshot()[0].Events[0].Content; got == "" {
+		t.Fatal("expected syntax event content to be sent before blocked semantic resolution")
+	}
+}
+
+func TestDrainQueueEnqueuesSemanticAfterSuccessfulReplay(t *testing.T) {
+	dir := t.TempDir()
+	received := &receivedBatches{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload models.BatchPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode error: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received.append(payload)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
+	cfg.Hub.URL = server.URL
+	cfg.Hub.AuthToken = "test-token"
+	cfg.Hub.BatchSec = 60
+	cfg.Hub.BatchSize = 50
+	cfg.Semantic.WorkerCount = 1
+	cfg.Semantic.QueueCapacity = 10
+	cfg.Semantic.TimeoutMs = 1000
+	cfg.Semantic.RetryDelayMs = 10
+	cfg.Semantic.MaxRetries = 1
+	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	queue, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	defer queue.Close()
+	resolver := &fakeSemanticResolver{relations: []models.Relation{{Type: "CALLS_RESOLVED", Source: "main", Target: "fmt.Println", SymbolID: "go:fmt.Println"}}}
+	dw := &DebouncedWatcher{
+		cfg:             cfg,
+		client:          client,
+		queue:           queue,
+		lastContentHash: make(map[string]string),
+		ctx:             context.Background(),
+	}
+	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	dw.semantic.Start(dw.ctx)
+	defer dw.semantic.Stop()
+
+	events := []models.FileEvent{{
+		Type:        models.EventModify,
+		Path:        filepath.Join(dir, "main.go"),
+		Project:     "demo",
+		MachineID:   cfg.MachineID,
+		ContentHash: "hash-1",
+		Content:     "package main\nfunc main() {}\n",
+	}}
+	if err := queue.Enqueue(cfg.MachineID, "demo", events); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := dw.DrainQueue(); err != nil {
+		t.Fatalf("drain queue: %v", err)
+	}
+
+	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 2 })
+	batches := received.snapshot()
+	if batches[0].Events[0].Content == "" {
+		t.Fatalf("expected replayed syntax event first, got %#v", batches[0].Events[0])
+	}
+	if len(batches[1].Events[0].Relations) != 1 || batches[1].Events[0].Content != "" {
+		t.Fatalf("expected semantic-only replay follow-up, got %#v", batches[1].Events[0])
+	}
 }
 
 func TestDebouncedWatcher_CreateModifyDelete(t *testing.T) {

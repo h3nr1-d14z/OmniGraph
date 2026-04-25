@@ -2,6 +2,7 @@ package sender
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,10 @@ func NewClient(baseURL, token, machineID string) *Client {
 
 // SendBatch POSTs events to the Hub with exponential backoff.
 func (c *Client) SendBatch(events []models.FileEvent, project string) error {
+	return c.SendBatchContext(context.Background(), events, project)
+}
+
+func (c *Client) SendBatchContext(ctx context.Context, events []models.FileEvent, project string) error {
 	payload := models.BatchPayload{
 		MachineID: c.MachineID,
 		Project:   project,
@@ -54,10 +59,14 @@ func (c *Client) SendBatch(events []models.FileEvent, project string) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 && c.RetryBackoff != nil {
-			time.Sleep(c.RetryBackoff(attempt))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(c.RetryBackoff(attempt)):
+			}
 		}
 
-		req, err := http.NewRequest("POST", c.BaseURL+"/batch", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/batch", bytes.NewReader(body))
 		if err != nil {
 			return err
 		}

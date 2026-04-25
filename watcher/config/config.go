@@ -28,12 +28,24 @@ type WatcherConfig struct {
 		MaxEventsPerSec int    `yaml:"max_events_per_sec"`
 	} `yaml:"hub"`
 
+	Semantic struct {
+		Enabled       bool `yaml:"enabled"`
+		WorkerCount   int  `yaml:"worker_count"`
+		QueueCapacity int  `yaml:"queue_capacity"`
+		TimeoutMs     int  `yaml:"timeout_ms"`
+		RetryDelayMs  int  `yaml:"retry_delay_ms"`
+		MaxRetries    int  `yaml:"max_retries"`
+		CacheSize     int  `yaml:"cache_size"`
+	} `yaml:"semantic"`
+
 	Ignore struct {
 		GitIgnore    bool     `yaml:"gitignore"`
 		DockerIgnore bool     `yaml:"dockerignore"`
 		Extra        []string `yaml:"extra"`
 	} `yaml:"ignore"`
 }
+
+const DefaultSemanticCacheSize = 256
 
 var DefaultProjectMarkers = []string{
 	".git",
@@ -82,6 +94,24 @@ func Load(path string) (*WatcherConfig, error) {
 	if cfg.Hub.MaxEventsPerSec == 0 {
 		cfg.Hub.MaxEventsPerSec = 100
 	}
+	if cfg.Semantic.WorkerCount == 0 {
+		cfg.Semantic.WorkerCount = 1
+	}
+	if cfg.Semantic.QueueCapacity == 0 {
+		cfg.Semantic.QueueCapacity = 100
+	}
+	if cfg.Semantic.TimeoutMs == 0 {
+		cfg.Semantic.TimeoutMs = 3000
+	}
+	if cfg.Semantic.RetryDelayMs == 0 {
+		cfg.Semantic.RetryDelayMs = 500
+	}
+	if cfg.Semantic.MaxRetries == 0 {
+		cfg.Semantic.MaxRetries = 3
+	}
+	if !hasYAMLPath(data, "semantic", "cache_size") {
+		cfg.Semantic.CacheSize = DefaultSemanticCacheSize
+	}
 	if cfg.AutoDetect == false && cfg.ProjectName == "" {
 		cfg.AutoDetect = true // default to auto-detect
 	}
@@ -90,6 +120,31 @@ func Load(path string) (*WatcherConfig, error) {
 	}
 
 	return &cfg, nil
+}
+
+func hasYAMLPath(data []byte, path ...string) bool {
+	var node yaml.Node
+	if err := yaml.Unmarshal(data, &node); err != nil || len(node.Content) == 0 {
+		return false
+	}
+	current := node.Content[0]
+	for _, segment := range path {
+		if current.Kind != yaml.MappingNode {
+			return false
+		}
+		found := false
+		for i := 0; i+1 < len(current.Content); i += 2 {
+			if current.Content[i].Value == segment {
+				current = current.Content[i+1]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *WatcherConfig) Save(path string) error {

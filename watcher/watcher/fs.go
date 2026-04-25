@@ -12,6 +12,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/omnigraph/watcher/config"
 	"github.com/omnigraph/watcher/models"
+	semanticworker "github.com/omnigraph/watcher/semantic/worker"
 	"github.com/omnigraph/watcher/sender"
 )
 
@@ -33,6 +34,7 @@ type DebouncedWatcher struct {
 	client   *sender.Client
 	queue    *LocalQueue
 
+	semantic        *semanticworker.Worker
 	watcher         *fsnotify.Watcher
 	pending         map[string]pendingEvent
 	lastContentHash map[string]string
@@ -64,6 +66,9 @@ func NewDebouncedWatcher(cfg *config.WatcherConfig, filter *IgnoreFilter, resolv
 		cancel:          cancel,
 		batchTicker:     time.NewTicker(time.Duration(cfg.Hub.BatchSec) * time.Second),
 	}
+	if cfg.Semantic.Enabled {
+		dw.semantic = semanticworker.New(semanticConfig(cfg), newGoSemanticResolver(cfg.Semantic.CacheSize), semanticBatchSender{client: client})
+	}
 	return dw, nil
 }
 
@@ -82,6 +87,9 @@ func (dw *DebouncedWatcher) Start() error {
 		fmt.Fprintf(os.Stderr, "[watch] discovered %d projects: %v\n", len(projects), projects)
 	}
 
+	if dw.semantic != nil {
+		dw.semantic.Start(dw.ctx)
+	}
 	go dw.processLoop()
 	go dw.sendLoop()
 
@@ -91,6 +99,9 @@ func (dw *DebouncedWatcher) Start() error {
 // Stop shuts down the watcher gracefully.
 func (dw *DebouncedWatcher) Stop() error {
 	dw.cancel()
+	if dw.semantic != nil {
+		dw.semantic.Stop()
+	}
 	dw.batchTicker.Stop()
 	return dw.watcher.Close()
 }
@@ -229,7 +240,9 @@ func (dw *DebouncedWatcher) flush() {
 
 	for project, projBatch := range byProject {
 		for _, chunk := range chunkEvents(projBatch, dw.cfg.Hub.BatchSize) {
-			dw.sendOrQueue(project, chunk)
+			if dw.sendOrQueue(project, chunk) {
+				dw.enqueueSemantic(chunk)
+			}
 		}
 	}
 }
@@ -325,18 +338,21 @@ func chunkEvents(events []models.FileEvent, size int) [][]models.FileEvent {
 	return chunks
 }
 
-func (dw *DebouncedWatcher) sendOrQueue(project string, events []models.FileEvent) {
+func (dw *DebouncedWatcher) sendOrQueue(project string, events []models.FileEvent) bool {
 	if err := dw.client.SendBatch(events, project); err != nil {
 		fmt.Fprintf(os.Stderr, "send failed for project %s, queuing locally: %v\n", project, err)
 		if dw.queue == nil {
-			return
+			return false
 		}
 		if qerr := dw.queue.Enqueue(dw.cfg.MachineID, project, events); qerr != nil {
 			fmt.Fprintf(os.Stderr, "queue error: %v\n", qerr)
-			return
+			return false
 		}
+		dw.markDurable(events)
+		return false
 	}
 	dw.markDurable(events)
+	return true
 }
 
 func (dw *DebouncedWatcher) markDurable(events []models.FileEvent) {
@@ -377,6 +393,7 @@ func (dw *DebouncedWatcher) DrainQueue() error {
 				return err
 			}
 			dw.markDurable(b.Events)
+			dw.enqueueSemantic(b.Events)
 			acked = append(acked, b.ID)
 		}
 		if err := dw.queue.Ack(acked); err != nil {

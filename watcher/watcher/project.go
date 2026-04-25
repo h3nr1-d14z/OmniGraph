@@ -83,6 +83,28 @@ func (pr *ProjectResolver) Resolve(filePath string) string {
 	return filepath.Base(filepath.Dir(filePath))
 }
 
+func (pr *ProjectResolver) ResolveRoot(filePath string) string {
+	pr.mu.RLock()
+	defer pr.mu.RUnlock()
+
+	var bestRoot string
+	var bestLen int
+	for dir := range pr.projects {
+		rel, err := filepath.Rel(dir, filePath)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		if len(dir) > bestLen {
+			bestLen = len(dir)
+			bestRoot = dir
+		}
+	}
+	if bestRoot != "" {
+		return bestRoot
+	}
+	return pr.root
+}
+
 // List returns all discovered project names.
 func (pr *ProjectResolver) List() []string {
 	pr.mu.RLock()
