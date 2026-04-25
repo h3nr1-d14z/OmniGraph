@@ -184,12 +184,13 @@ class _FakeContent:
 class _FakeQdrant:
     def __init__(self):
         self.deleted = []
+        self.upserts = []
 
     def delete_by_file(self, file_path, machine_id):
         self.deleted.append((file_path, machine_id))
 
     def upsert(self, vectors, payloads):
-        pass
+        self.upserts.append((vectors, payloads))
 
 
 class _FakeHTTP:
@@ -258,6 +259,66 @@ def test_handle_upserts_passes_graph_relations():
     }
     assert content.files == [("m1", "demo", "/src/main.go", "package main\nfunc main() { helper() }\n")]
     assert content.refreshed == ("m1", "demo")
+
+
+def test_handle_upserts_semantic_only_event_preserves_existing_state():
+    memgraph = _FakeMemgraph()
+    qdrant = _FakeQdrant()
+    content = _FakeContent()
+    ev = FileEvent(
+        type="MODIFY",
+        path="/src/main.go",
+        project="demo",
+        machine_id="m1",
+        timestamp=1,
+        content_hash="abc",
+        relations=[
+            {
+                "type": "CALLS_RESOLVED",
+                "source": "main",
+                "target": "fmt.Println",
+                "target_type": "symbol",
+                "line": 2,
+                "confidence": "semantic",
+                "layer": "semantic",
+                "status": "resolved",
+                "symbol_id": "go:fmt.Println",
+                "target_ref": "fmt.Println",
+                "package": "fmt",
+                "language": "go",
+            }
+        ],
+    )
+
+    import asyncio
+    asyncio.run(_handle_upserts([ev], "m1", "demo", qdrant, memgraph, content, _FakeHTTP()))
+
+    assert qdrant.deleted == []
+    assert qdrant.upserts == []
+    assert memgraph.deleted == []
+    assert memgraph.entities == []
+    assert content.deleted == []
+    assert content.files == []
+    assert content.refreshed is None
+    assert memgraph.relations == [
+        {
+            "machine_id": "m1",
+            "project": "demo",
+            "file_path": "/src/main.go",
+            "type": "CALLS_RESOLVED",
+            "source": "main",
+            "target": "fmt.Println",
+            "target_type": "symbol",
+            "line": 2,
+            "confidence": "semantic",
+            "layer": "semantic",
+            "status": "resolved",
+            "symbol_id": "go:fmt.Println",
+            "target_ref": "fmt.Println",
+            "package": "fmt",
+            "language": "go",
+        }
+    ]
 
 
 def test_handle_delete_cleans_rename_paths():
