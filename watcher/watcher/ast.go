@@ -86,10 +86,30 @@ func appendEntity(node *sitter.Node, content []byte, out *[]models.Entity, entit
 	})
 }
 
+func appendGoMethodEntity(node *sitter.Node, content []byte, out *[]models.Entity) {
+	name := node.ChildByFieldName("name")
+	if name == nil {
+		return
+	}
+	methodName := goMethodName(node, content)
+	if methodName == "" {
+		methodName = string(name.Content(content))
+	}
+	*out = append(*out, models.Entity{
+		Name:      methodName,
+		Type:      "function",
+		Line:      int(name.StartPoint().Row) + 1,
+		StartLine: int(node.StartPoint().Row) + 1,
+		EndLine:   int(node.EndPoint().Row) + 1,
+	})
+}
+
 func extractGo(node *sitter.Node, content []byte, out *[]models.Entity) {
 	switch node.Type() {
-	case "function_declaration", "method_declaration":
+	case "function_declaration":
 		appendEntity(node, content, out, "function")
+	case "method_declaration":
+		appendGoMethodEntity(node, content, out)
 	case "type_spec":
 		appendEntity(node, content, out, "type")
 	}
@@ -161,6 +181,9 @@ func extractGoRelations(node *sitter.Node, content []byte, out *[]models.Relatio
 		}
 	case "function_declaration", "method_declaration":
 		source := nodeName(node, content)
+		if node.Type() == "method_declaration" {
+			source = goMethodName(node, content)
+		}
 		if source != "" {
 			extractGoCallRelations(node, content, source, out)
 		}
@@ -233,6 +256,37 @@ func nodeName(node *sitter.Node, content []byte) string {
 		return ""
 	}
 	return string(name.Content(content))
+}
+
+func goMethodName(node *sitter.Node, content []byte) string {
+	name := node.ChildByFieldName("name")
+	receiver := node.ChildByFieldName("receiver")
+	if name == nil || receiver == nil {
+		return ""
+	}
+	receiverType := goReceiverType(receiver, content)
+	if receiverType == "" {
+		return string(name.Content(content))
+	}
+	return receiverType + "." + string(name.Content(content))
+}
+
+func goReceiverType(node *sitter.Node, content []byte) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Type() {
+	case "type_identifier", "identifier":
+		return string(node.Content(content))
+	case "pointer_type":
+		return goReceiverType(node.Child(1), content)
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if receiverType := goReceiverType(node.Child(i), content); receiverType != "" {
+			return receiverType
+		}
+	}
+	return ""
 }
 
 // ExtractFileSymbols is a convenience wrapper that reads the file then extracts.

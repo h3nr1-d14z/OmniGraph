@@ -494,7 +494,7 @@ func TestExtractSymbols_IncludesLineRanges(t *testing.T) {
 }
 
 func TestExtractGraph_GoRelations(t *testing.T) {
-	content := []byte("package main\n\nimport \"fmt\"\n\nfunc helper() {}\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\thelper()\n}\n")
+	content := []byte("package main\n\nimport \"fmt\"\n\ntype Runner struct{}\n\nfunc (Runner) Run() { helper() }\n\nfunc helper() {}\n\nfunc main() {\n\tfmt.Println(\"hello\")\n\thelper()\n}\n")
 	entities, relations, err := ExtractGraph("main.go", content)
 	if err != nil {
 		t.Fatalf("extract graph: %v", err)
@@ -504,11 +504,13 @@ func TestExtractGraph_GoRelations(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"CONTAINS::main":                false,
-		"CONTAINS::helper":              false,
-		"IMPORTS::fmt":                  false,
-		"CALLS_SYNTAX:main:fmt.Println": false,
-		"CALLS_SYNTAX:main:helper":      false,
+		"CONTAINS::main":                 false,
+		"CONTAINS::helper":               false,
+		"CONTAINS::Runner.Run":           false,
+		"IMPORTS::fmt":                   false,
+		"CALLS_SYNTAX:main:fmt.Println":  false,
+		"CALLS_SYNTAX:main:helper":       false,
+		"CALLS_SYNTAX:Runner.Run:helper": false,
 	}
 	for _, rel := range relations {
 		key := rel.Type + ":" + rel.Source + ":" + rel.Target
