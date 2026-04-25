@@ -165,14 +165,45 @@ func TestResolverIgnoresNonGoFiles(t *testing.T) {
 	}
 }
 
-func tempModule(t *testing.T) string {
+func BenchmarkResolverFileScoped(b *testing.B) {
+	root := tempModule(b)
+	file := filepath.Join(root, "main.go")
+	writeFile(b, file, `package demo
+
+import "fmt"
+
+type Runner struct{}
+
+func helper() {}
+func (Runner) Run() { helper() }
+
+func main() {
+	fmt.Println("hello")
+	Runner{}.Run()
+}
+`)
+	resolver := Resolver{}
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		relations, err := resolver.Resolve(ctx, Request{Root: root, FilePath: file})
+		if err != nil {
+			b.Fatalf("resolve: %v", err)
+		}
+		if len(relations) == 0 {
+			b.Fatal("expected relations")
+		}
+	}
+}
+
+func tempModule(t testing.TB) string {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "go.mod"), "module example.com/demo\n\ngo 1.22\n")
 	return root
 }
 
-func writeFile(t *testing.T, path string, content string) {
+func writeFile(t testing.TB, path string, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
