@@ -26,14 +26,16 @@ func semanticConfig(cfg *config.WatcherConfig) semanticworker.Config {
 }
 
 type goSemanticResolver struct {
-	cache *semanticRelationCache
+	cache      *semanticRelationCache
+	queue      *LocalQueue
+	retryDelay time.Duration
 }
 
-func newGoSemanticResolver(cacheSize int) goSemanticResolver {
+func newGoSemanticResolver(cacheSize int, queue *LocalQueue, retryDelay time.Duration) goSemanticResolver {
 	if cacheSize < 0 {
 		cacheSize = config.DefaultSemanticCacheSize
 	}
-	return goSemanticResolver{cache: newSemanticRelationCache(cacheSize)}
+	return goSemanticResolver{cache: newSemanticRelationCache(cacheSize), queue: queue, retryDelay: retryDelay}
 }
 
 func (r goSemanticResolver) Resolve(ctx context.Context, job semanticworker.Job) ([]models.Relation, error) {
@@ -47,10 +49,25 @@ func (r goSemanticResolver) Resolve(ctx context.Context, job semanticworker.Job)
 		Content:  job.Content,
 	})
 	if err != nil {
+		r.markFailed(job, err)
+		if job.OutboxID != 0 && r.queue != nil {
+			return nil, nil
+		}
 		return nil, err
 	}
 	r.cache.put(key, relations)
+	if len(relations) == 0 {
+		r.markDone(job)
+	}
 	return relations, nil
+}
+
+func (r goSemanticResolver) markDone(job semanticworker.Job) {
+	markSemanticDone(r.queue, job)
+}
+
+func (r goSemanticResolver) markFailed(job semanticworker.Job, err error) {
+	markSemanticFailed(r.queue, job, r.retryDelay, err.Error())
 }
 
 type semanticRelationCache struct {
@@ -108,10 +125,34 @@ func cloneRelations(relations []models.Relation) []models.Relation {
 }
 
 type semanticBatchSender struct {
-	client *sender.Client
+	client     *sender.Client
+	queue      *LocalQueue
+	retryDelay time.Duration
+}
+
+func markSemanticDone(queue *LocalQueue, job semanticworker.Job) {
+	if queue != nil && job.OutboxID != 0 {
+		_ = queue.MarkSemanticJobDone(job.OutboxID, job.ContentHash, job.LeaseVersion)
+	}
+}
+
+func markSemanticFailed(queue *LocalQueue, job semanticworker.Job, retryDelay time.Duration, message string) {
+	if queue != nil && job.OutboxID != 0 {
+		_ = queue.MarkSemanticJobFailed(job.OutboxID, job.ContentHash, job.LeaseVersion, retryDelay, message)
+	}
 }
 
 func (s semanticBatchSender) Send(ctx context.Context, job semanticworker.Job, relations []models.Relation) error {
+	if s.queue != nil && job.OutboxID != 0 {
+		current, err := s.queue.IsSemanticJobCurrent(job.OutboxID, job.ContentHash, job.LeaseVersion)
+		if err != nil {
+			markSemanticFailed(s.queue, job, s.retryDelay, err.Error())
+			return err
+		}
+		if !current {
+			return nil
+		}
+	}
 	event := models.FileEvent{
 		Type:        models.EventModify,
 		Path:        job.Path,
@@ -121,14 +162,95 @@ func (s semanticBatchSender) Send(ctx context.Context, job semanticworker.Job, r
 		ContentHash: job.ContentHash,
 		Relations:   relations,
 	}
-	return s.client.SendBatchContext(ctx, []models.FileEvent{event}, job.Project)
+	if err := s.client.SendBatchContext(ctx, []models.FileEvent{event}, job.Project); err != nil {
+		markSemanticFailed(s.queue, job, s.retryDelay, err.Error())
+		if job.OutboxID != 0 && s.queue != nil {
+			return nil
+		}
+		return err
+	}
+	markSemanticDone(s.queue, job)
+	return nil
+}
+
+func (dw *DebouncedWatcher) semanticLoop() {
+	defer dw.semanticWg.Done()
+	ticker := time.NewTicker(time.Duration(dw.cfg.Semantic.RetryDelayMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		dw.drainSemanticJobs()
+		select {
+		case <-dw.ctx.Done():
+			return
+		case <-dw.semanticNotify:
+		case <-ticker.C:
+		}
+	}
+}
+
+func (dw *DebouncedWatcher) drainSemanticJobs() {
+	if dw.queue == nil || dw.semantic == nil {
+		return
+	}
+	jobs, err := dw.queue.ClaimDueSemanticJobs(dw.cfg.Semantic.QueueCapacity, semanticLeaseDuration(dw.cfg))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "semantic job claim failed: %v\n", err)
+		return
+	}
+	for _, job := range jobs {
+		workerJob := job.WorkerJob()
+		if !dw.isLatestSemanticJob(workerJob) {
+			if err := dw.queue.ReleaseSemanticJob(job.ID, job.ContentHash, job.LeaseVersion, time.Duration(dw.cfg.Semantic.RetryDelayMs)*time.Millisecond); err != nil && err != ErrSemanticJobStale {
+				fmt.Fprintf(os.Stderr, "semantic job release failed for %s: %v\n", job.Path, err)
+			}
+			continue
+		}
+		if !dw.semantic.Enqueue(workerJob) {
+			if err := dw.queue.ReleaseSemanticJob(job.ID, job.ContentHash, job.LeaseVersion, time.Duration(dw.cfg.Semantic.RetryDelayMs)*time.Millisecond); err != nil && err != ErrSemanticJobStale {
+				fmt.Fprintf(os.Stderr, "semantic job release failed for %s: %v\n", job.Path, err)
+			}
+			fmt.Fprintf(os.Stderr, "semantic enqueue skipped for %s: queue full\n", job.Path)
+			return
+		}
+	}
+}
+
+func semanticLeaseDuration(cfg *config.WatcherConfig) time.Duration {
+	lease := time.Duration(cfg.Semantic.TimeoutMs+cfg.Semantic.RetryDelayMs) * time.Millisecond
+	if lease < time.Second {
+		return time.Second
+	}
+	return lease
+}
+
+func (dw *DebouncedWatcher) signalSemantic() {
+	if dw.semanticNotify == nil {
+		return
+	}
+	select {
+	case dw.semanticNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (dw *DebouncedWatcher) isLatestSemanticJob(job semanticworker.Job) bool {
+	dw.mu.Lock()
+	defer dw.mu.Unlock()
+	latest := dw.lastContentHash[job.Path]
+	return latest == "" || latest == job.ContentHash
 }
 
 func (dw *DebouncedWatcher) enqueueSemantic(events []models.FileEvent) {
-	if dw.semantic == nil {
+	if dw.semantic == nil || dw.queue == nil {
 		return
 	}
 	for _, ev := range events {
+		if ev.Type == models.EventDelete || ev.Type == models.EventRename {
+			if err := dw.queue.DeleteSemanticJob(dw.cfg.MachineID, ev.Project, ev.Path); err != nil {
+				fmt.Fprintf(os.Stderr, "semantic job delete failed for %s: %v\n", ev.Path, err)
+			}
+			continue
+		}
 		if ev.ContentHash == "" || ev.Content == "" || filepath.Ext(ev.Path) != ".go" {
 			continue
 		}
@@ -136,15 +258,17 @@ func (dw *DebouncedWatcher) enqueueSemantic(events []models.FileEvent) {
 		if dw.resolver != nil {
 			root = dw.resolver.ResolveRoot(ev.Path)
 		}
-		if !dw.semantic.Enqueue(semanticworker.Job{
+		if err := dw.queue.UpsertSemanticJob(semanticworker.Job{
 			MachineID:   dw.cfg.MachineID,
 			Project:     ev.Project,
 			Root:        root,
 			Path:        ev.Path,
 			ContentHash: ev.ContentHash,
 			Content:     []byte(ev.Content),
-		}) {
-			fmt.Fprintf(os.Stderr, "semantic enqueue skipped for %s: queue full\n", ev.Path)
+		}, dw.cfg.Semantic.MaxRetries); err != nil {
+			fmt.Fprintf(os.Stderr, "semantic job enqueue failed for %s: %v\n", ev.Path, err)
+			continue
 		}
+		dw.signalSemantic()
 	}
 }

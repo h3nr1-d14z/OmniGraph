@@ -35,6 +35,8 @@ type DebouncedWatcher struct {
 	queue    *LocalQueue
 
 	semantic        *semanticworker.Worker
+	semanticNotify  chan struct{}
+	semanticWg      sync.WaitGroup
 	watcher         *fsnotify.Watcher
 	pending         map[string]pendingEvent
 	lastContentHash map[string]string
@@ -67,7 +69,9 @@ func NewDebouncedWatcher(cfg *config.WatcherConfig, filter *IgnoreFilter, resolv
 		batchTicker:     time.NewTicker(time.Duration(cfg.Hub.BatchSec) * time.Second),
 	}
 	if cfg.Semantic.Enabled {
-		dw.semantic = semanticworker.New(semanticConfig(cfg), newGoSemanticResolver(cfg.Semantic.CacheSize), semanticBatchSender{client: client})
+		dw.semanticNotify = make(chan struct{}, 1)
+		retryDelay := time.Duration(cfg.Semantic.RetryDelayMs) * time.Millisecond
+		dw.semantic = semanticworker.New(semanticConfig(cfg), newGoSemanticResolver(cfg.Semantic.CacheSize, queue, retryDelay), semanticBatchSender{client: client, queue: queue, retryDelay: retryDelay})
 	}
 	return dw, nil
 }
@@ -89,6 +93,9 @@ func (dw *DebouncedWatcher) Start() error {
 
 	if dw.semantic != nil {
 		dw.semantic.Start(dw.ctx)
+		dw.semanticWg.Add(1)
+		go dw.semanticLoop()
+		dw.signalSemantic()
 	}
 	go dw.processLoop()
 	go dw.sendLoop()
@@ -101,6 +108,7 @@ func (dw *DebouncedWatcher) Stop() error {
 	dw.cancel()
 	if dw.semantic != nil {
 		dw.semantic.Stop()
+		dw.semanticWg.Wait()
 	}
 	dw.batchTicker.Stop()
 	return dw.watcher.Close()

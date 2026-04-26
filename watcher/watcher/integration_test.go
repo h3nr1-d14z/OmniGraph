@@ -218,18 +218,28 @@ func TestSemanticEnabledSendsSemanticOnlyBatch(t *testing.T) {
 	cfg.Semantic.QueueCapacity = 10
 	cfg.Semantic.TimeoutMs = 1000
 	cfg.Semantic.RetryDelayMs = 10
-	cfg.Semantic.MaxRetries = 1
+	cfg.Semantic.MaxRetries = 2
 	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	queue, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	defer queue.Close()
 	resolver := &fakeSemanticResolver{relations: []models.Relation{{Type: "CALLS_RESOLVED", Source: "main", Target: "fmt.Println", SymbolID: "go:fmt.Println"}}}
 	dw := &DebouncedWatcher{
-		cfg:    cfg,
-		client: client,
-		ctx:    context.Background(),
+		cfg:             cfg,
+		client:          client,
+		queue:           queue,
+		lastContentHash: make(map[string]string),
+		ctx:             context.Background(),
+		semanticNotify:  make(chan struct{}, 1),
 	}
-	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	retryDelay := time.Duration(cfg.Semantic.RetryDelayMs) * time.Millisecond
+	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client, queue: queue, retryDelay: retryDelay})
 	dw.semantic.Start(dw.ctx)
 	defer dw.semantic.Stop()
 
+	dw.markDurable([]models.FileEvent{{Path: filepath.Join(dir, "main.go"), ContentHash: "hash-1"}})
 	dw.enqueueSemantic([]models.FileEvent{{
 		Type:        models.EventModify,
 		Path:        filepath.Join(dir, "main.go"),
@@ -238,6 +248,7 @@ func TestSemanticEnabledSendsSemanticOnlyBatch(t *testing.T) {
 		ContentHash: "hash-1",
 		Content:     "package main\nfunc main() {}\n",
 	}})
+	dw.drainSemanticJobs()
 
 	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 1 })
 	batch := received.snapshot()[0]
@@ -254,9 +265,12 @@ func TestSemanticEnabledSendsSemanticOnlyBatch(t *testing.T) {
 	if event.ContentHash != "hash-1" || event.Path == "" {
 		t.Fatalf("unexpected semantic event identity: %#v", event)
 	}
+	if done, err := queue.SemanticJobCount(SemanticJobDone); err != nil || done != 1 {
+		t.Fatalf("done semantic jobs = %d err=%v", done, err)
+	}
 }
 
-func TestSemanticEnqueueLogsWhenQueueIsFull(t *testing.T) {
+func TestSemanticDrainLogsWhenWorkerQueueIsFull(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.WatcherConfig{MachineID: "test-machine", WatchRoot: dir}
 	cfg.Semantic.WorkerCount = 1
@@ -264,8 +278,31 @@ func TestSemanticEnqueueLogsWhenQueueIsFull(t *testing.T) {
 	cfg.Semantic.TimeoutMs = 1000
 	cfg.Semantic.RetryDelayMs = 10
 	cfg.Semantic.MaxRetries = 1
-	dw := &DebouncedWatcher{cfg: cfg, ctx: context.Background()}
-	dw.semantic = semanticworker.New(semanticConfig(cfg), &fakeSemanticResolver{block: make(chan struct{})}, semanticBatchSender{client: sender.NewClient("http://127.0.0.1", "test-token", cfg.MachineID)})
+	queue, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	defer queue.Close()
+	dw := &DebouncedWatcher{
+		cfg:             cfg,
+		queue:           queue,
+		lastContentHash: make(map[string]string),
+		ctx:             context.Background(),
+	}
+	dw.semantic = semanticworker.New(semanticworker.Config{QueueCapacity: 1, WorkerCount: 1, JobTimeout: time.Second}, &fakeSemanticResolver{block: make(chan struct{})}, semanticBatchSender{client: sender.NewClient("http://127.0.0.1", "test-token", cfg.MachineID), queue: queue, retryDelay: time.Millisecond})
+	if !dw.semantic.Enqueue(semanticworker.Job{MachineID: cfg.MachineID, Project: "demo", Path: filepath.Join(dir, "busy.go"), ContentHash: "busy", Content: []byte("package main\n")}) {
+		t.Fatal("failed to prefill semantic worker queue")
+	}
+	if err := queue.UpsertSemanticJob(semanticworker.Job{
+		MachineID:   cfg.MachineID,
+		Project:     "demo",
+		Root:        dir,
+		Path:        filepath.Join(dir, "queued.go"),
+		ContentHash: "hash-1",
+		Content:     []byte("package main\nfunc queued() {}\n"),
+	}, cfg.Semantic.MaxRetries); err != nil {
+		t.Fatalf("upsert semantic job: %v", err)
+	}
 
 	oldStderr := os.Stderr
 	readPipe, writePipe, err := os.Pipe()
@@ -275,21 +312,7 @@ func TestSemanticEnqueueLogsWhenQueueIsFull(t *testing.T) {
 	os.Stderr = writePipe
 	defer func() { os.Stderr = oldStderr }()
 
-	dw.enqueueSemantic([]models.FileEvent{{
-		Type:        models.EventModify,
-		Path:        filepath.Join(dir, "one.go"),
-		Project:     "demo",
-		MachineID:   cfg.MachineID,
-		ContentHash: "hash-1",
-		Content:     "package main\nfunc one() {}\n",
-	}, {
-		Type:        models.EventModify,
-		Path:        filepath.Join(dir, "two.go"),
-		Project:     "demo",
-		MachineID:   cfg.MachineID,
-		ContentHash: "hash-2",
-		Content:     "package main\nfunc two() {}\n",
-	}})
+	dw.drainSemanticJobs()
 	writePipe.Close()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(readPipe); err != nil {
@@ -336,6 +359,11 @@ func TestSemanticRelationCacheCanBeDisabled(t *testing.T) {
 	}
 }
 
+func newTestSemanticWorker(cfg *config.WatcherConfig, client *sender.Client, queue *LocalQueue, resolver semanticworker.Resolver) *semanticworker.Worker {
+	retryDelay := time.Duration(cfg.Semantic.RetryDelayMs) * time.Millisecond
+	return semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client, queue: queue, retryDelay: retryDelay})
+}
+
 func TestBlockedSemanticResolverDoesNotDelaySyntaxSend(t *testing.T) {
 	dir := t.TempDir()
 	received := &receivedBatches{}
@@ -362,14 +390,21 @@ func TestBlockedSemanticResolverDoesNotDelaySyntaxSend(t *testing.T) {
 	cfg.Semantic.RetryDelayMs = 10
 	cfg.Semantic.MaxRetries = 1
 	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
+	queue, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	defer queue.Close()
 	resolver := &fakeSemanticResolver{relations: []models.Relation{{Type: "CALLS_RESOLVED", Target: "fmt.Println"}}, block: make(chan struct{})}
 	dw := &DebouncedWatcher{
 		cfg:             cfg,
 		client:          client,
+		queue:           queue,
 		lastContentHash: make(map[string]string),
 		ctx:             context.Background(),
+		semanticNotify:  make(chan struct{}, 1),
 	}
-	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	dw.semantic = newTestSemanticWorker(cfg, client, queue, resolver)
 	dw.semantic.Start(dw.ctx)
 	defer dw.semantic.Stop()
 
@@ -385,6 +420,7 @@ func TestBlockedSemanticResolverDoesNotDelaySyntaxSend(t *testing.T) {
 		t.Fatal("syntax send failed")
 	}
 	dw.enqueueSemantic(events)
+	dw.drainSemanticJobs()
 
 	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 1 && resolver.count() == 1 })
 	if got := received.snapshot()[0].Events[0].Content; got == "" {
@@ -431,7 +467,7 @@ func TestDrainQueueEnqueuesSemanticAfterSuccessfulReplay(t *testing.T) {
 		lastContentHash: make(map[string]string),
 		ctx:             context.Background(),
 	}
-	dw.semantic = semanticworker.New(semanticConfig(cfg), resolver, semanticBatchSender{client: client})
+	dw.semantic = newTestSemanticWorker(cfg, client, queue, resolver)
 	dw.semantic.Start(dw.ctx)
 	defer dw.semantic.Stop()
 
@@ -449,6 +485,7 @@ func TestDrainQueueEnqueuesSemanticAfterSuccessfulReplay(t *testing.T) {
 	if err := dw.DrainQueue(); err != nil {
 		t.Fatalf("drain queue: %v", err)
 	}
+	dw.drainSemanticJobs()
 
 	waitForTestCondition(t, func() bool { return len(received.snapshot()) == 2 })
 	batches := received.snapshot()
@@ -926,6 +963,230 @@ func TestProjectResolver_AutoDiscover(t *testing.T) {
 	if got := pr.Resolve(filepath.Join(dir, "frontend-app", "node_modules", "foo", "index.js")); got != "frontend-app" {
 		// node_modules should still resolve to frontend-app because project boundary is at package.json
 		t.Errorf("resolve frontend-app/node_modules = %s, want frontend-app", got)
+	}
+}
+
+func TestSemanticOutboxPersistsClaimsAndCompletesJob(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	q, err := OpenQueue(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	q.Close()
+
+	q, err = OpenQueue(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer q.Close()
+	jobs, err := q.ClaimDueSemanticJobs(10, time.Second)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ContentHash != "hash-1" || string(jobs[0].Content) != "package main" {
+		t.Fatalf("unexpected jobs: %#v", jobs)
+	}
+	if current, err := q.IsSemanticJobCurrent(jobs[0].ID, "hash-1", jobs[0].LeaseVersion); err != nil || !current {
+		t.Fatalf("current = %v err=%v", current, err)
+	}
+	if err := q.MarkSemanticJobDone(jobs[0].ID, "hash-1", jobs[0].LeaseVersion); err != nil {
+		t.Fatalf("done: %v", err)
+	}
+	if done, err := q.SemanticJobCount(SemanticJobDone); err != nil || done != 1 {
+		t.Fatalf("done count = %d err=%v", done, err)
+	}
+}
+
+func TestSemanticOutboxConcurrentClaimIsExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	q1, err := OpenQueue(path)
+	if err != nil {
+		t.Fatalf("open q1: %v", err)
+	}
+	defer q1.Close()
+	q2, err := OpenQueue(path)
+	if err != nil {
+		t.Fatalf("open q2: %v", err)
+	}
+	defer q2.Close()
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q1.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan int, 2)
+	for _, q := range []*LocalQueue{q1, q2} {
+		wg.Add(1)
+		go func(q *LocalQueue) {
+			defer wg.Done()
+			jobs, err := q.ClaimDueSemanticJobs(1, time.Second)
+			if err != nil {
+				t.Errorf("claim: %v", err)
+				return
+			}
+			results <- len(jobs)
+		}(q)
+	}
+	wg.Wait()
+	close(results)
+	total := 0
+	for count := range results {
+		total += count
+	}
+	if total != 1 {
+		t.Fatalf("claimed jobs total = %d, want 1", total)
+	}
+}
+
+func TestSemanticOutboxReclaimsExpiredRunningJob(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(1, time.Hour)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("initial claim: jobs=%#v err=%v", jobs, err)
+	}
+	jobs, err = q.ClaimDueSemanticJobs(1, time.Hour)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("unexpected unexpired reclaim: jobs=%#v err=%v", jobs, err)
+	}
+	if _, err := q.db.Exec("UPDATE semantic_jobs SET updated_at = ?", unixMilli()-2000); err != nil {
+		t.Fatalf("age running job: %v", err)
+	}
+	jobs, err = q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("expected expired reclaim: jobs=%#v err=%v", jobs, err)
+	}
+}
+
+func TestSemanticOutboxRejectsStaleOwnerAfterReclaim(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	firstClaim, err := q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(firstClaim) != 1 {
+		t.Fatalf("first claim: jobs=%#v err=%v", firstClaim, err)
+	}
+	if _, err := q.db.Exec("UPDATE semantic_jobs SET updated_at = ?", unixMilli()-2000); err != nil {
+		t.Fatalf("age running job: %v", err)
+	}
+	secondClaim, err := q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(secondClaim) != 1 {
+		t.Fatalf("second claim: jobs=%#v err=%v", secondClaim, err)
+	}
+	if firstClaim[0].LeaseVersion == secondClaim[0].LeaseVersion {
+		t.Fatalf("lease version did not advance: first=%d second=%d", firstClaim[0].LeaseVersion, secondClaim[0].LeaseVersion)
+	}
+	if current, err := q.IsSemanticJobCurrent(firstClaim[0].ID, "hash-1", firstClaim[0].LeaseVersion); err != nil || current {
+		t.Fatalf("stale owner current = %v err=%v", current, err)
+	}
+	if err := q.MarkSemanticJobDone(firstClaim[0].ID, "hash-1", firstClaim[0].LeaseVersion); err != ErrSemanticJobStale {
+		t.Fatalf("stale done err = %v, want ErrSemanticJobStale", err)
+	}
+	if err := q.MarkSemanticJobFailed(firstClaim[0].ID, "hash-1", firstClaim[0].LeaseVersion, time.Millisecond, "stale"); err != ErrSemanticJobStale {
+		t.Fatalf("stale fail err = %v, want ErrSemanticJobStale", err)
+	}
+	if err := q.MarkSemanticJobDone(secondClaim[0].ID, "hash-1", secondClaim[0].LeaseVersion); err != nil {
+		t.Fatalf("current done: %v", err)
+	}
+}
+
+func TestSemanticOutboxRetriesThenMarksDead(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q.UpsertSemanticJob(job, 2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim first: jobs=%#v err=%v", jobs, err)
+	}
+	if err := q.MarkSemanticJobFailed(jobs[0].ID, "hash-1", jobs[0].LeaseVersion, time.Millisecond, "temporary"); err != nil {
+		t.Fatalf("fail first: %v", err)
+	}
+	if pending, err := q.SemanticJobCount(SemanticJobPending); err != nil || pending != 1 {
+		t.Fatalf("pending count = %d err=%v", pending, err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	jobs, err = q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim second: jobs=%#v err=%v", jobs, err)
+	}
+	if err := q.MarkSemanticJobFailed(jobs[0].ID, "hash-1", jobs[0].LeaseVersion, time.Millisecond, "terminal"); err != nil {
+		t.Fatalf("fail second: %v", err)
+	}
+	if dead, err := q.SemanticJobCount(SemanticJobDead); err != nil || dead != 1 {
+		t.Fatalf("dead count = %d err=%v", dead, err)
+	}
+}
+
+func TestSemanticOutboxUpsertNewHashInvalidatesRunningJob(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+	oldJob := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "old", Content: []byte("old")}
+	newJob := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "new", Content: []byte("new")}
+	if err := q.UpsertSemanticJob(oldJob, 3); err != nil {
+		t.Fatalf("upsert old: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim old: jobs=%#v err=%v", jobs, err)
+	}
+	if err := q.UpsertSemanticJob(newJob, 3); err != nil {
+		t.Fatalf("upsert new: %v", err)
+	}
+	if current, err := q.IsSemanticJobCurrent(jobs[0].ID, "old", jobs[0].LeaseVersion); err != nil || current {
+		t.Fatalf("old current = %v err=%v", current, err)
+	}
+	jobs, err = q.ClaimDueSemanticJobs(1, time.Second)
+	if err != nil || len(jobs) != 1 || jobs[0].ContentHash != "new" {
+		t.Fatalf("claim new: jobs=%#v err=%v", jobs, err)
+	}
+}
+
+func TestSemanticOutboxDeleteRemovesPendingJob(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+	job := semanticworker.Job{MachineID: "m1", Project: "p1", Root: "/repo", Path: "/repo/main.go", ContentHash: "hash-1", Content: []byte("package main")}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := q.DeleteSemanticJob("m1", "p1", "/repo/main.go"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(10, time.Second)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected no semantic jobs, got %#v", jobs)
 	}
 }
 

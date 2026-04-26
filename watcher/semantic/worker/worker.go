@@ -9,12 +9,14 @@ import (
 )
 
 type Job struct {
-	MachineID   string
-	Project     string
-	Root        string
-	Path        string
-	ContentHash string
-	Content     []byte
+	OutboxID     int
+	LeaseVersion int
+	MachineID    string
+	Project      string
+	Root         string
+	Path         string
+	ContentHash  string
+	Content      []byte
 }
 
 type Resolver interface {
