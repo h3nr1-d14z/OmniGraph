@@ -36,6 +36,9 @@ type WatcherConfig struct {
 		RetryDelayMs  int  `yaml:"retry_delay_ms"`
 		MaxRetries    int  `yaml:"max_retries"`
 		CacheSize     int  `yaml:"cache_size"`
+		// Dead-letter reconciliation cadence (REPORT-ONLY).
+		// 0 = disabled; default 3600 (1h) on first Load() if unset.
+		ReconcileIntervalSec int `yaml:"reconcile_interval_sec"`
 	} `yaml:"semantic"`
 
 	Ignore struct {
@@ -46,6 +49,14 @@ type WatcherConfig struct {
 }
 
 const DefaultSemanticCacheSize = 256
+
+// DefaultReconcileIntervalSec is the dead-letter reconcile cadence used
+// when reconcile_interval_sec is omitted from config. 0 disables the loop.
+const DefaultReconcileIntervalSec = 3600
+
+// SemanticDeadRowSoftCap triggers a warning log when dead-row count exceeds
+// this; signals operator attention without aborting watcher.
+const SemanticDeadRowSoftCap = 1000
 
 var DefaultProjectMarkers = []string{
 	".git",
@@ -111,6 +122,9 @@ func Load(path string) (*WatcherConfig, error) {
 	}
 	if !hasYAMLPath(data, "semantic", "cache_size") {
 		cfg.Semantic.CacheSize = DefaultSemanticCacheSize
+	}
+	if !hasYAMLPath(data, "semantic", "reconcile_interval_sec") {
+		cfg.Semantic.ReconcileIntervalSec = DefaultReconcileIntervalSec
 	}
 	if cfg.AutoDetect == false && cfg.ProjectName == "" {
 		cfg.AutoDetect = true // default to auto-detect

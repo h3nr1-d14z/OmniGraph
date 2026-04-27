@@ -71,26 +71,65 @@ class ContentStore:
             );
             """
         )
+        # US-013: idempotent migration to add content_hash column on existing
+        # databases. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we catch the
+        # duplicate-column OperationalError (analog of pg's
+        # isDuplicateColumnError). NULL on legacy rows → self-healing on first
+        # touch (full embed path, then hash is recorded).
+        try:
+            self._conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT")
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     def upsert_file(self, machine_id: str, project: str, file_path: str, content: str) -> None:
         self.upsert_files([(machine_id, project, file_path, content)])
 
-    def upsert_files(self, files: list[tuple[str, str, str, str]]) -> None:
+    def upsert_files(
+        self,
+        files: list[tuple[str, str, str, str]],
+        content_hashes: dict[tuple[str, str], str] | None = None,
+    ) -> None:
         if not files:
             return
         updated_at = int(time.time())
+        hashes = content_hashes or {}
         self._conn.executemany(
             """
-            INSERT INTO files (machine_id, project, file_path, content, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO files (machine_id, project, file_path, content, updated_at, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(machine_id, file_path) DO UPDATE SET
                 project=excluded.project,
                 content=excluded.content,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                content_hash=COALESCE(excluded.content_hash, files.content_hash)
             """,
-            [(machine_id, project, file_path, content, updated_at) for machine_id, project, file_path, content in files],
+            [
+                (machine_id, project, file_path, content, updated_at, hashes.get((machine_id, file_path)))
+                for machine_id, project, file_path, content in files
+            ],
         )
         self._sync_fts(files)
+        self._conn.commit()
+
+    def get_content_hashes(self) -> dict[tuple[str, str], str]:
+        """Bulk preload all (machine_id, file_path) → content_hash for non-NULL rows.
+
+        Used at Hub startup to seed the in-memory short-circuit cache, so a
+        watcher restart's catch-up scan doesn't trigger redundant re-embeds.
+        """
+        rows = self._conn.execute(
+            "SELECT machine_id, file_path, content_hash FROM files WHERE content_hash IS NOT NULL",
+        ).fetchall()
+        return {(machine_id, file_path): content_hash for machine_id, file_path, content_hash in rows}
+
+    def update_content_hash(self, machine_id: str, file_path: str, content_hash: str) -> None:
+        """Persist a content hash after a successful Qdrant upsert."""
+        self._conn.execute(
+            "UPDATE files SET content_hash = ? WHERE machine_id = ? AND file_path = ?",
+            (content_hash, machine_id, file_path),
+        )
         self._conn.commit()
 
     def _sync_fts(self, files: list[tuple[str, str, str, str]]) -> None:
@@ -245,6 +284,7 @@ class ContentStore:
         files_count = self._count_rows("files", filters, params)
         project_trees_count = self._count_rows("project_trees", filters, params)
         fts_rows_count = self._count_rows("files_fts", filters, params)
+        content_hashed = self._count_content_hashed(filters, params)
 
         return {
             "db_path": self.db_path,
@@ -252,7 +292,17 @@ class ContentStore:
             "project_trees": project_trees_count,
             "global_query_embeddings": self._count_query_embeddings(),
             "fts_rows": fts_rows_count,
+            "content_hashed": content_hashed,
         }
+
+    def _count_content_hashed(self, filters: list[str], params: list[str]) -> int:
+        clauses = list(filters) + ["content_hash IS NOT NULL"]
+        where = f" WHERE {' AND '.join(clauses)}"
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM files{where}",
+            params,
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def _count_rows(self, table: str, filters: list[str], params: list[str]) -> int:
         where = f" WHERE {' AND '.join(filters)}" if filters else ""

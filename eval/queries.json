@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "description": "Phase 0.5 baseline eval queries — captures top-10 against current corpus before Phase 4 embedder swap.",
+  "scope": {
+    "machine_id": "test-machine-01",
+    "note": "Fixture-based corpus from tests/fixtures/project_a (Go) and project_b (TypeScript)."
+  },
+  "categories": {
+    "code-symbolic": "Direct entity-name lookups (exact identifiers a developer would type).",
+    "nl-semantic": "Natural-language intent without naming the entity directly.",
+    "dependency-graph": "Queries probing relationships, imports, structure."
+  },
+  "queries": [
+    {
+      "id": "Q01",
+      "category": "code-symbolic",
+      "query": "User struct definition",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "Q02",
+      "category": "code-symbolic",
+      "query": "HashPassword function",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "Q03",
+      "category": "code-symbolic",
+      "query": "UserProfile interface",
+      "expected_paths_substring": ["types.ts"]
+    },
+    {
+      "id": "Q04",
+      "category": "code-symbolic",
+      "query": "AuthState type",
+      "expected_paths_substring": ["types.ts"]
+    },
+    {
+      "id": "nl-semantic-01",
+      "category": "nl-semantic",
+      "query": "how does the backend hash user passwords",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "nl-semantic-02",
+      "category": "nl-semantic",
+      "query": "shape of the authenticated user payload sent from frontend",
+      "expected_paths_substring": ["types.ts"]
+    },
+    {
+      "id": "nl-semantic-03",
+      "category": "nl-semantic",
+      "query": "where does the system define a user account record",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "nl-semantic-04",
+      "category": "nl-semantic",
+      "query": "frontend types for login session state",
+      "expected_paths_substring": ["types.ts"]
+    },
+    {
+      "id": "dep-graph-01",
+      "category": "dependency-graph",
+      "query": "import declarations in Go backend",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "dep-graph-02",
+      "category": "dependency-graph",
+      "query": "exported TypeScript symbols",
+      "expected_paths_substring": ["types.ts"]
+    },
+    {
+      "id": "dep-graph-03",
+      "category": "dependency-graph",
+      "query": "struct fields of the user model",
+      "expected_paths_substring": ["model.go"]
+    },
+    {
+      "id": "dep-graph-04",
+      "category": "dependency-graph",
+      "query": "TypeScript interfaces nullable user reference",
+      "expected_paths_substring": ["types.ts"]
+    }
+  ]
+}

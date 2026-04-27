@@ -230,7 +230,7 @@ func TestSemanticEnabledSendsSemanticOnlyBatch(t *testing.T) {
 		cfg:             cfg,
 		client:          client,
 		queue:           queue,
-		lastContentHash: make(map[string]string),
+		lastContentHash: newBoundedHashMap(lastContentHashLimit),
 		ctx:             context.Background(),
 		semanticNotify:  make(chan struct{}, 1),
 	}
@@ -286,7 +286,7 @@ func TestSemanticDrainLogsWhenWorkerQueueIsFull(t *testing.T) {
 	dw := &DebouncedWatcher{
 		cfg:             cfg,
 		queue:           queue,
-		lastContentHash: make(map[string]string),
+		lastContentHash: newBoundedHashMap(lastContentHashLimit),
 		ctx:             context.Background(),
 	}
 	dw.semantic = semanticworker.New(semanticworker.Config{QueueCapacity: 1, WorkerCount: 1, JobTimeout: time.Second}, &fakeSemanticResolver{block: make(chan struct{})}, semanticBatchSender{client: sender.NewClient("http://127.0.0.1", "test-token", cfg.MachineID), queue: queue, retryDelay: time.Millisecond})
@@ -400,7 +400,7 @@ func TestBlockedSemanticResolverDoesNotDelaySyntaxSend(t *testing.T) {
 		cfg:             cfg,
 		client:          client,
 		queue:           queue,
-		lastContentHash: make(map[string]string),
+		lastContentHash: newBoundedHashMap(lastContentHashLimit),
 		ctx:             context.Background(),
 		semanticNotify:  make(chan struct{}, 1),
 	}
@@ -464,7 +464,7 @@ func TestDrainQueueEnqueuesSemanticAfterSuccessfulReplay(t *testing.T) {
 		cfg:             cfg,
 		client:          client,
 		queue:           queue,
-		lastContentHash: make(map[string]string),
+		lastContentHash: newBoundedHashMap(lastContentHashLimit),
 		ctx:             context.Background(),
 	}
 	dw.semantic = newTestSemanticWorker(cfg, client, queue, resolver)
@@ -1188,6 +1188,360 @@ func TestSemanticOutboxDeleteRemovesPendingJob(t *testing.T) {
 	if len(jobs) != 0 {
 		t.Fatalf("expected no semantic jobs, got %#v", jobs)
 	}
+}
+
+//Reconciler.Tick reports dead-row count and per-error-class
+// breakdown. Force one job to dead state, verify Tick observes count > 0.
+func TestReconcileReportsDeadRowCount(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	job := semanticworker.Job{
+		MachineID: "m1", Project: "p", Root: "/r", Path: "/r/x.go",
+		ContentHash: "h1", Content: []byte("package x"),
+	}
+	if err := q.UpsertSemanticJob(job, 1); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(10, time.Minute)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim: %v %d", err, len(jobs))
+	}
+	if err := q.MarkSemanticJobFailed(jobs[0].ID, jobs[0].ContentHash, jobs[0].LeaseVersion, time.Millisecond, "package broken"); err != nil {
+		t.Fatalf("mark failed (force dead via max_retries=1): %v", err)
+	}
+
+	deadCount, err := q.SemanticJobCount(SemanticJobDead)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if deadCount != 1 {
+		t.Fatalf("expected 1 dead row, got %d", deadCount)
+	}
+
+	classes, err := q.SemanticDeadErrorClassCounts()
+	if err != nil {
+		t.Fatalf("classes: %v", err)
+	}
+	if len(classes) != 1 {
+		t.Fatalf("expected 1 error class, got %d (%v)", len(classes), classes)
+	}
+	for _, n := range classes {
+		if n != 1 {
+			t.Errorf("expected class count 1, got %d", n)
+		}
+	}
+}
+
+//log dedup — when (deadCount, errorClasses) is unchanged
+// across consecutive ticks, digest should match (forcing log suppression).
+func TestReconcileDigestStableAcrossTicksWhenStateUnchanged(t *testing.T) {
+	d1 := reconcileDigest(3, map[string]int{"abc": 2, "def": 1})
+	d2 := reconcileDigest(3, map[string]int{"def": 1, "abc": 2})
+	if d1 != d2 {
+		t.Errorf("digest must be order-independent (sorted internally): %s vs %s", d1, d2)
+	}
+	d3 := reconcileDigest(4, map[string]int{"abc": 2, "def": 1})
+	if d1 == d3 {
+		t.Errorf("digest must change when count changes")
+	}
+}
+
+//replay_count audit trail — admin replay increments
+// replay_count without touching attempt_count. (Companion test to
+// TestIncrementReplayCountAuditPreserved which targets the queue method
+// directly.) This one targets a dead row specifically.
+func TestAdminReplayResurrectsDeadRow(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	job := semanticworker.Job{
+		MachineID: "m1", Project: "p", Root: "/r", Path: "/r/dead.go",
+		ContentHash: "h1", Content: []byte("package x"),
+	}
+	if err := q.UpsertSemanticJob(job, 1); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	jobs, err := q.ClaimDueSemanticJobs(10, time.Minute)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim: %v %d", err, len(jobs))
+	}
+	if err := q.MarkSemanticJobFailed(jobs[0].ID, jobs[0].ContentHash, jobs[0].LeaseVersion, time.Millisecond, "fatal"); err != nil {
+		t.Fatalf("force dead: %v", err)
+	}
+
+	dead, _ := q.SemanticJobCount(SemanticJobDead)
+	if dead != 1 {
+		t.Fatalf("setup: expected 1 dead row, got %d", dead)
+	}
+
+	if err := q.IncrementReplayCount(jobs[0].ID); err != nil {
+		t.Fatalf("admin replay: %v", err)
+	}
+
+	// Dead count back to 0, pending = 1
+	dead, _ = q.SemanticJobCount(SemanticJobDead)
+	pending, _ := q.SemanticJobCount(SemanticJobPending)
+	if dead != 0 || pending != 1 {
+		t.Errorf("expected dead=0 pending=1 after replay, got dead=%d pending=%d", dead, pending)
+	}
+
+	var replay, attempt int
+	if err := q.db.QueryRow("SELECT replay_count, attempt_count FROM semantic_jobs WHERE id = ?", jobs[0].ID).Scan(&replay, &attempt); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if replay != 1 {
+		t.Errorf("expected replay_count=1, got %d", replay)
+	}
+	if attempt != 1 {
+		t.Errorf("attempt_count must stay 1 (audit), got %d", attempt)
+	}
+}
+
+//addRecursive emits synthetic Create events for files
+// already on disk at scan time (catch-up scan). Without this fix, files
+// created BEFORE watcher startup OR inside a freshly-created subdir during
+// the Add()→list-contents window would be missed.
+func TestAddRecursiveEmitsCatchUpForExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate 50 .go files BEFORE watcher starts.
+	const n = 50
+	for i := 0; i < n; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("file%d.go", i))
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("package x\nvar V%d = %d\n", i, i)), 0644); err != nil {
+			t.Fatalf("seed write: %v", err)
+		}
+	}
+
+	received, _, cleanup := startTestWatcher(t, dir, 50, 100, 200)
+	defer cleanup()
+
+	// addRecursive (in Start) emits synthetic Creates → pending → debounce →
+	// flush → batch sent. Wait for catch-up to land.
+	waitForTestCondition(t, func() bool {
+		snap := received.snapshot()
+		seen := make(map[string]struct{})
+		for _, b := range snap {
+			for _, ev := range b.Events {
+				if filepath.Ext(ev.Path) == ".go" {
+					seen[ev.Path] = struct{}{}
+				}
+			}
+		}
+		return len(seen) >= n
+	})
+}
+
+//race-safe catch-up — files created concurrently during
+// addRecursive are not lost. We pre-populate then continue creating during
+// the watcher's startup window.
+func TestAddRecursiveCatchUpUnderConcurrentCreation(t *testing.T) {
+	dir := t.TempDir()
+
+	const preSeed = 20
+	const concurrent = 30
+
+	for i := 0; i < preSeed; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("seed%d.go", i))
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("package s\nvar S%d = 0\n", i)), 0644); err != nil {
+			t.Fatalf("seed write: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Race against startup: create more files while watcher boots.
+		time.Sleep(2 * time.Millisecond)
+		for i := 0; i < concurrent; i++ {
+			path := filepath.Join(dir, fmt.Sprintf("conc%d.go", i))
+			_ = os.WriteFile(path, []byte(fmt.Sprintf("package c\nvar C%d = 0\n", i)), 0644)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	received, _, cleanup := startTestWatcher(t, dir, 50, 100, 200)
+	defer cleanup()
+
+	wg.Wait()
+
+	waitForTestCondition(t, func() bool {
+		snap := received.snapshot()
+		seen := make(map[string]struct{})
+		for _, b := range snap {
+			for _, ev := range b.Events {
+				seen[ev.Path] = struct{}{}
+			}
+		}
+		// Total .go file count = preSeed + concurrent. All must reach Hub.
+		count := 0
+		for path := range seen {
+			if filepath.Ext(path) == ".go" {
+				count++
+			}
+		}
+		return count >= preSeed+concurrent
+	})
+}
+
+//lastContentHash is FIFO-bounded; oldest entries evict
+// after limit. 60k inserts on a 50k cap leaves exactly 50k, with first 10k
+// gone and most-recent 50k retained.
+func TestLastContentHashLRUEviction(t *testing.T) {
+	b := newBoundedHashMap(50_000)
+	for i := 0; i < 60_000; i++ {
+		b.set(fmt.Sprintf("/p/%d.go", i), fmt.Sprintf("h%d", i))
+	}
+	if got := b.len(); got != 50_000 {
+		t.Fatalf("expected 50000 after 60k inserts, got %d", got)
+	}
+	// Oldest 10k evicted (FIFO).
+	for i := 0; i < 10_000; i++ {
+		if got := b.get(fmt.Sprintf("/p/%d.go", i)); got != "" {
+			t.Errorf("expected /p/%d.go evicted, still present with %s", i, got)
+			break
+		}
+	}
+	// Most-recent retained.
+	for i := 50_000; i < 60_000; i++ {
+		if got := b.get(fmt.Sprintf("/p/%d.go", i)); got != fmt.Sprintf("h%d", i) {
+			t.Errorf("expected /p/%d.go retained, got %q", i, got)
+			break
+		}
+	}
+}
+
+// delete must remove key from both data and order slice so it can be
+// re-inserted after delete without phantom presence in eviction order.
+func TestBoundedHashMapDeleteAllowsReinsert(t *testing.T) {
+	b := newBoundedHashMap(3)
+	b.set("a", "1")
+	b.set("b", "2")
+	b.delete("a")
+	b.set("c", "3")
+	b.set("d", "4")
+	// At this point: b, c, d (3 entries). a was deleted, not bumping eviction.
+	if got := b.len(); got != 3 {
+		t.Fatalf("expected len 3, got %d", got)
+	}
+	if got := b.get("b"); got != "2" {
+		t.Errorf("expected b retained after delete-then-insert, got %q", got)
+	}
+}
+
+//stable Dequeue order even when created_at is shared
+// (second-resolution time.Now().Unix() ties → must rely on id ASC for ordering).
+func TestDequeueStableOrderUnderSharedCreatedAt(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	for i := 0; i < 5; i++ {
+		ev := []models.FileEvent{{Type: models.EventCreate, Path: fmt.Sprintf("/f%d.go", i)}}
+		if err := q.Enqueue("m1", "p1", ev); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+	}
+
+	batches, err := q.Dequeue(10)
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if len(batches) != 5 {
+		t.Fatalf("expected 5 batches, got %d", len(batches))
+	}
+	for i := 1; i < len(batches); i++ {
+		if batches[i].ID <= batches[i-1].ID {
+			t.Errorf("batches not ordered by id: %v at %d not > %v at %d", batches[i].ID, i, batches[i-1].ID, i-1)
+		}
+		expected := fmt.Sprintf("/f%d.go", i)
+		if batches[i].Events[0].Path != expected {
+			t.Errorf("batch %d: expected %s, got %s", i, expected, batches[i].Events[0].Path)
+		}
+	}
+}
+
+//replay_count column exists with default 0; IncrementReplayCount
+// bumps replay_count without touching attempt_count (audit trail preserved).
+func TestIncrementReplayCountAuditPreserved(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	job := semanticworker.Job{
+		MachineID:   "m1",
+		Project:     "p1",
+		Root:        "/r",
+		Path:        "/r/x.go",
+		ContentHash: "h1",
+		Content:     []byte("package x"),
+	}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	var initialReplay, initialAttempt int
+	row := q.db.QueryRow("SELECT replay_count, attempt_count FROM semantic_jobs WHERE path = ?", job.Path)
+	if err := row.Scan(&initialReplay, &initialAttempt); err != nil {
+		t.Fatalf("read replay_count default: %v", err)
+	}
+	if initialReplay != 0 {
+		t.Errorf("expected replay_count default 0, got %d", initialReplay)
+	}
+
+	var jobID int
+	if err := q.db.QueryRow("SELECT id FROM semantic_jobs WHERE path = ?", job.Path).Scan(&jobID); err != nil {
+		t.Fatalf("get id: %v", err)
+	}
+
+	if err := q.IncrementReplayCount(jobID); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	var afterReplay, afterAttempt int
+	var afterState string
+	if err := q.db.QueryRow("SELECT replay_count, attempt_count, state FROM semantic_jobs WHERE id = ?", jobID).Scan(&afterReplay, &afterAttempt, &afterState); err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if afterReplay != 1 {
+		t.Errorf("expected replay_count 1, got %d", afterReplay)
+	}
+	if afterAttempt != initialAttempt {
+		t.Errorf("attempt_count changed from %d to %d (must stay untouched)", initialAttempt, afterAttempt)
+	}
+	if afterState != string(SemanticJobPending) {
+		t.Errorf("expected state pending after replay, got %s", afterState)
+	}
+}
+
+//schema migration is idempotent — opening existing DB twice
+// must not error on duplicate replay_count column.
+func TestOpenQueueIdempotentReplayCountMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+
+	q1, err := OpenQueue(path)
+	if err != nil {
+		t.Fatalf("open #1: %v", err)
+	}
+	q1.Close()
+
+	q2, err := OpenQueue(path)
+	if err != nil {
+		t.Fatalf("open #2: %v", err)
+	}
+	defer q2.Close()
 }
 
 func TestLocalQueue_EnqueueDequeue(t *testing.T) {

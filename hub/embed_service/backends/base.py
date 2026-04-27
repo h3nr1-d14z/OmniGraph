@@ -37,3 +37,17 @@ class BaseBackend(ABC):
     def name(self) -> str:
         """Backend name for logging."""
         ...
+
+    @abstractmethod
+    def format_input(self, texts: list[str], mode: str) -> list[str]:
+        """Apply per-backend pre-tokenizer transformation (e.g., model-specific
+        instruction prefixes). Each backend must override:
+
+        - Nomic-style models: prepend ``search_document:`` / ``search_query:``.
+        - Jina-style code models: return texts unchanged.
+        - Future code-specific models: implement their own contract.
+
+        Adding a new backend without overriding this method is a hard error
+        (forced by ABC), preventing silent prefix-mismatch bugs.
+        """
+        ...

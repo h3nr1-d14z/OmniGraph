@@ -15,12 +15,16 @@ class SemanticSearchResult(BaseModel):
     project: str
     snippet: str
     score: float
+    matched_entities: list[str] = Field(
+        default_factory=list,
+        description="All symbol names contributing to RRF score for this file",
+    )
 
 
 class DependencyGraphInput(BaseModel):
     entity_name: str = Field(..., description="Name of the function, class, or component")
     direction: str = Field(..., description="upstream, downstream, or both")
-    machine_id: str = Field("local", description="Identifier of the machine where the entity resides")
+    machine_id: str | None = Field(None, description="Optional machine identifier; None searches all machines")
 
 
 class DependencyGraphResult(BaseModel):

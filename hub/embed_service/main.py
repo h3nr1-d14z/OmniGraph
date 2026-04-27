@@ -2,14 +2,13 @@
 
 import os
 import threading
+from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
 
 from backends import get_backend
-
-app = FastAPI(title="OmniGraph Embed Service")
 
 # Lazy-load backend on first request to avoid slow startup
 _backend = None
@@ -23,6 +22,16 @@ def _get_backend():
             if _backend is None:
                 _backend = get_backend()
     return _backend
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Eager-load model so /ready never triggers a cold load
+    _get_backend()
+    yield
+
+
+app = FastAPI(title="OmniGraph Embed Service", lifespan=lifespan)
 
 
 class EmbedRequest(BaseModel):

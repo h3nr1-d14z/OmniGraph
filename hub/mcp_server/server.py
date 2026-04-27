@@ -27,6 +27,11 @@ def semantic_search_code_tool(query: str, project_scope: str | None = None, mach
         query: Natural language description (e.g. "password hashing function").
         project_scope: Optional project name to filter results.
         machine_id: Optional machine identifier to filter results.
+
+    Returns JSON array of results. Each result includes a ``matched_entities``
+    field listing all symbol names (e.g. function/class names) that contributed
+    to the RRF score for that file. Use this to decide whether to call
+    ``read_full_file`` for additional context.
     """
     inp = SemanticSearchInput(query=query, project_scope=project_scope, machine_id=machine_id)
     results = semantic_search_code(inp)
@@ -34,13 +39,13 @@ def semantic_search_code_tool(query: str, project_scope: str | None = None, mach
 
 
 @mcp.tool()
-def get_dependency_graph_tool(entity_name: str, direction: str, machine_id: str = "local") -> str:
+def get_dependency_graph_tool(entity_name: str, direction: str, machine_id: str | None = None) -> str:
     """Analyze call flow and dependencies.
 
     Args:
         entity_name: Name of the function, class, or component.
         direction: upstream, downstream, or both.
-        machine_id: Identifier of the machine where the entity resides.
+        machine_id: Optional machine identifier; None searches all machines.
     """
     inp = DependencyGraphInput(entity_name=entity_name, direction=direction, machine_id=machine_id)
     result = get_dependency_graph(inp)

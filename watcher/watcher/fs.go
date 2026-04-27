@@ -18,6 +18,67 @@ import (
 
 const maxFileSize = 500 * 1024
 
+// lastContentHash cap prevents unbounded growth on long-running watchers.
+// Files moved out of watch tree (rm -rf parent, FS unmount) leave orphan
+// entries; FIFO eviction matches the semanticRelationCache precedent.
+const lastContentHashLimit = 50000
+
+// boundedHashMap is a FIFO-bounded path->hash map. Caller must serialize access.
+type boundedHashMap struct {
+	limit int
+	order []string
+	data  map[string]string
+}
+
+func newBoundedHashMap(limit int) *boundedHashMap {
+	return &boundedHashMap{limit: limit, data: make(map[string]string)}
+}
+
+func (b *boundedHashMap) get(key string) string {
+	if b == nil {
+		return ""
+	}
+	return b.data[key]
+}
+
+func (b *boundedHashMap) set(key, value string) {
+	if b == nil {
+		return
+	}
+	if _, exists := b.data[key]; !exists {
+		b.order = append(b.order, key)
+	}
+	b.data[key] = value
+	for len(b.order) > b.limit {
+		oldest := b.order[0]
+		b.order = b.order[1:]
+		delete(b.data, oldest)
+	}
+}
+
+func (b *boundedHashMap) delete(key string) {
+	if b == nil {
+		return
+	}
+	if _, exists := b.data[key]; !exists {
+		return
+	}
+	delete(b.data, key)
+	for i, k := range b.order {
+		if k == key {
+			b.order = append(b.order[:i], b.order[i+1:]...)
+			return
+		}
+	}
+}
+
+func (b *boundedHashMap) len() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.data)
+}
+
 type pendingEvent struct {
 	Type      models.EventType
 	Path      string
@@ -39,7 +100,7 @@ type DebouncedWatcher struct {
 	semanticWg      sync.WaitGroup
 	watcher         *fsnotify.Watcher
 	pending         map[string]pendingEvent
-	lastContentHash map[string]string
+	lastContentHash *boundedHashMap
 	mu              sync.Mutex
 	timer           *time.Timer
 	batchTicker     *time.Ticker
@@ -63,7 +124,7 @@ func NewDebouncedWatcher(cfg *config.WatcherConfig, filter *IgnoreFilter, resolv
 		queue:           queue,
 		watcher:         w,
 		pending:         make(map[string]pendingEvent),
-		lastContentHash: make(map[string]string),
+		lastContentHash: newBoundedHashMap(lastContentHashLimit),
 		ctx:             ctx,
 		cancel:          cancel,
 		batchTicker:     time.NewTicker(time.Duration(cfg.Hub.BatchSec) * time.Second),
@@ -114,6 +175,19 @@ func (dw *DebouncedWatcher) Stop() error {
 	return dw.watcher.Close()
 }
 
+// addRecursive installs fsnotify watchers on root and every subdirectory,
+// AND emits synthetic Create events for files already present at scan time.
+// This closes the race where files created inside a fresh subdirectory
+// between mkdir and our Add() would otherwise be missed.
+//
+// Order is critical: filepath.Walk visits a directory's callback BEFORE
+// listing its contents, so we install the watcher on a dir before any
+// children are processed. Files created during the microsecond window
+// between Add() and content listing are still captured because the
+// watcher is already installed → kernel Create events route through
+// processLoop to the pending map. The pending map's dedupe (via
+// mergeEventType) collapses any synthetic+kernel double-fire on the
+// same path within the debounce window into a single event.
 func (dw *DebouncedWatcher) addRecursive(root string) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -125,6 +199,10 @@ func (dw *DebouncedWatcher) addRecursive(root string) error {
 			}
 			return dw.watcher.Add(path)
 		}
+		if dw.filter.Match(path) {
+			return nil
+		}
+		dw.handleEvent(fsnotify.Event{Name: path, Op: fsnotify.Create})
 		return nil
 	})
 }
@@ -308,7 +386,7 @@ func (dw *DebouncedWatcher) finalizeEvent(pending pendingEvent) (models.FileEven
 
 	hash := contentHash(content)
 	dw.mu.Lock()
-	unchanged := dw.lastContentHash[pending.Path] == hash
+	unchanged := dw.lastContentHash.get(pending.Path) == hash
 	dw.mu.Unlock()
 	if unchanged {
 		return models.FileEvent{}, false
@@ -370,10 +448,10 @@ func (dw *DebouncedWatcher) markDurable(events []models.FileEvent) {
 	for _, ev := range events {
 		switch ev.Type {
 		case models.EventDelete, models.EventRename:
-			delete(dw.lastContentHash, ev.Path)
+			dw.lastContentHash.delete(ev.Path)
 		default:
 			if ev.ContentHash != "" {
-				dw.lastContentHash[ev.Path] = ev.ContentHash
+				dw.lastContentHash.set(ev.Path, ev.ContentHash)
 			}
 		}
 	}

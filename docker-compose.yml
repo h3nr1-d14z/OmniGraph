@@ -42,6 +42,7 @@ services:
     ports:
       - "${EMBED_SERVICE_PORT:-8000}:8000"
     environment:
+      - HF_HUB_CACHE=/models
       - EMBED_BACKEND=${EMBED_BACKEND:-auto}
       - EMBED_WORKERS=${EMBED_WORKERS:-1}
       - EMBED_BATCH_SIZE=${EMBED_BATCH_SIZE:-32}
@@ -53,8 +54,9 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=10)\""]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 15s
+      retries: 12
+      start_period: 30s
     depends_on:
       qdrant:
         condition: service_healthy
@@ -72,10 +74,16 @@ services:
       - EMBED_SERVICE_URL=http://embed-service:8000
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-omnigraph_code}
       - QDRANT_STATS_EXACT=${QDRANT_STATS_EXACT:-false}
       - QDRANT_STATS_SCOPED_EXACT=${QDRANT_STATS_SCOPED_EXACT:-true}
       - MEMGRAPH_URI=bolt://memgraph:7687
       - CONTENT_DB_PATH=/data/hub-content.db
+      - EMBED_MAX_CHARS=${EMBED_MAX_CHARS:-32000}
+      - SLIDING_WINDOW_CHARS=${SLIDING_WINDOW_CHARS:-2400}
+      - SLIDING_STRIDE_CHARS=${SLIDING_STRIDE_CHARS:-600}
+      - MAX_CHUNKS_PER_FILE=${MAX_CHUNKS_PER_FILE:-64}
+      - MAX_CHUNKS_PER_REQUEST=${MAX_CHUNKS_PER_REQUEST:-32}
     volumes:
       - ./data:/data
     mem_limit: ${HUB_API_MEM_LIMIT:-2g}

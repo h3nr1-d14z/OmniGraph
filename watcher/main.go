@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/omnigraph/watcher/config"
 	"github.com/omnigraph/watcher/semantic/goresolver"
@@ -29,6 +30,8 @@ func main() {
 		runWatch()
 	case "semantic":
 		runSemantic()
+	case "replay":
+		runReplay()
 	default:
 		usage()
 		os.Exit(1)
@@ -42,11 +45,38 @@ func usage() {
 	fmt.Println("  init      Create default config at ~/.config/omnigraph/watcher.yaml")
 	fmt.Println("  watch     Start watching a project directory")
 	fmt.Println("  semantic  Resolve Go semantic relations for one file and print JSON")
+	fmt.Println("  replay    Re-inject a dead-letter semantic job by id (admin)")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  watcher init")
 	fmt.Println("  watcher watch -config ~/.config/omnigraph/watcher.yaml")
 	fmt.Println("  watcher semantic -root ./my-module -file ./my-module/main.go")
+	fmt.Println("  watcher replay -id 42")
+}
+
+func runReplay() {
+	fs := flag.NewFlagSet("replay", flag.ExitOnError)
+	id := fs.Int("id", 0, "semantic_jobs row id to re-inject")
+	queuePath := fs.String("queue", "", "Path to watcher-queue.db (defaults to ~/.config/omnigraph/watcher-queue.db)")
+	fs.Parse(os.Args[2:])
+
+	if *id <= 0 {
+		fmt.Fprintln(os.Stderr, "replay requires -id <int>")
+		os.Exit(1)
+	}
+
+	q, err := watcher.OpenQueue(*queuePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "queue open: %v\n", err)
+		os.Exit(1)
+	}
+	defer q.Close()
+
+	if err := q.IncrementReplayCount(*id); err != nil {
+		fmt.Fprintf(os.Stderr, "replay failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("replayed semantic_jobs id=%d (state=pending, replay_count incremented; attempt_count untouched)\n", *id)
 }
 
 func runInit() {
@@ -68,6 +98,7 @@ func runInit() {
 	cfg.Semantic.RetryDelayMs = 500
 	cfg.Semantic.MaxRetries = 3
 	cfg.Semantic.CacheSize = config.DefaultSemanticCacheSize
+	cfg.Semantic.ReconcileIntervalSec = config.DefaultReconcileIntervalSec
 	cfg.Ignore.GitIgnore = true
 	cfg.Ignore.DockerIgnore = true
 
@@ -180,6 +211,14 @@ func runWatch() {
 	if err := dw.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "watcher start error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Dead-letter reconcile loop (REPORT-ONLY).
+	reconcileCtx, reconcileCancel := context.WithCancel(context.Background())
+	defer reconcileCancel()
+	if cfg.Semantic.ReconcileIntervalSec > 0 {
+		reconciler := watcher.NewReconciler(queue, time.Duration(cfg.Semantic.ReconcileIntervalSec)*time.Second)
+		go reconciler.Run(reconcileCtx)
 	}
 
 	fmt.Printf("Watching %s (machine=%s)\n", root, cfg.MachineID)

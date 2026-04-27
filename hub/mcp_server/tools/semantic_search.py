@@ -1,4 +1,12 @@
-"""Tool 1: semantic_search_code — Query Qdrant for code snippets."""
+"""Tool 1: semantic_search_code — Query Qdrant for code snippets.
+
+Hybrid ranking uses Reciprocal Rank Fusion (RRF). RRF is rank-based, so it
+sidesteps the score-scale mismatch between cosine similarity (Qdrant) and
+BM25 rank (FTS5) that breaks naive additive merges.
+
+Reference: Cormack, Clarke, Buettcher 2009 — outperforms condorcet and
+score-based fusion for short candidate lists (n=10-20).
+"""
 
 import hashlib
 import os
@@ -10,6 +18,14 @@ from models.schema import SemanticSearchInput, SemanticSearchResult
 EMBED_URL = os.getenv("EMBED_SERVICE_URL", "http://localhost:8000")
 EMBED_MODE = "query"
 HYBRID_LIMIT = 10
+# RRF constant: smaller k = sharper rank-1 dominance. k=20 calibrated for
+# short prefetch lists (HYBRID_LIMIT=10). k=60 (Cormack default) is too
+# flat for n=10 — top vs bottom RRF spread <14%.
+RRF_K = int(os.getenv("RRF_K", "20"))
+# Asymmetric ranker weights. Semantic intent dominates code RAG; lexical
+# is precision-boost for identifier-heavy queries.
+RRF_SEMANTIC_WEIGHT = float(os.getenv("RRF_SEMANTIC_WEIGHT", "1.0"))
+RRF_LEXICAL_WEIGHT = float(os.getenv("RRF_LEXICAL_WEIGHT", "0.7"))
 
 # Module-level reusable HTTP client for connection pooling
 _http_client: httpx.Client | None = None
@@ -50,52 +66,95 @@ def _embed_query(text: str) -> list[float]:
     return embedding
 
 
+def _rrf_score(rank: int, k: int = RRF_K) -> float:
+    """Reciprocal Rank Fusion score for a 1-indexed rank position."""
+    return 1.0 / (k + rank)
+
+
 def _merge_results(
     semantic_results: list[dict],
     lexical_results: list[dict[str, str | float]],
 ) -> list[SemanticSearchResult]:
-    merged: dict[tuple[str, str, str, str, str], SemanticSearchResult] = {}
+    """File-level RRF merge of semantic and lexical results.
 
-    for rank, result in enumerate(semantic_results):
+    Merge key is ``(machine_id, project, file_path)`` — collapses multiple
+    chunks of the same file into one ranked entry whose score sums RRF
+    contributions from both rankers.
+    """
+    by_file: dict[tuple[str, str, str], dict] = {}
+
+    for rank, result in enumerate(semantic_results, start=1):
         payload = result["payload"]
         key = (
             payload.get("machine_id", ""),
             payload.get("project", ""),
             payload.get("file_path", ""),
-            payload.get("chunk_id", ""),
-            payload.get("entity", ""),
         )
-        merged[key] = SemanticSearchResult(
-            file_path=payload.get("file_path", ""),
-            machine_id=payload.get("machine_id", ""),
-            project=payload.get("project", ""),
-            snippet=payload.get("snippet", "")[:500],
-            score=float(result["score"]) + max(0.0, 0.2 - rank * 0.01),
+        rrf = RRF_SEMANTIC_WEIGHT * _rrf_score(rank)
+        entry = by_file.setdefault(
+            key,
+            {
+                "machine_id": key[0],
+                "project": key[1],
+                "file_path": key[2],
+                "snippet": "",
+                "score": 0.0,
+                "best_semantic_rank": 9999,
+                "entities": set(),
+            },
         )
+        entry["score"] += rrf
+        # Take snippet from the highest-ranked semantic chunk (best summary).
+        if rank < entry["best_semantic_rank"]:
+            entry["best_semantic_rank"] = rank
+            snippet = payload.get("snippet", "") or ""
+            if snippet:
+                entry["snippet"] = snippet[:500]
+        entity = payload.get("entity", "")
+        if entity:
+            entry["entities"].add(entity)
 
-    for lexical in lexical_results:
+    for rank, lexical in enumerate(lexical_results, start=1):
         key = (
-            str(lexical["machine_id"]),
-            str(lexical["project"]),
-            str(lexical["file_path"]),
-            "",
-            "lexical",
+            str(lexical.get("machine_id", "")),
+            str(lexical.get("project", "")),
+            str(lexical.get("file_path", "")),
         )
-        lexical_boost = float(lexical["score"]) * 0.1
-        if key in merged:
-            merged[key].score += lexical_boost
-            if not merged[key].snippet:
-                merged[key].snippet = str(lexical["snippet"])[:500]
-            continue
-        merged[key] = SemanticSearchResult(
-            file_path=str(lexical["file_path"]),
-            machine_id=str(lexical["machine_id"]),
-            project=str(lexical["project"]),
-            snippet=str(lexical["snippet"])[:500],
-            score=lexical_boost,
+        rrf = RRF_LEXICAL_WEIGHT * _rrf_score(rank)
+        entry = by_file.setdefault(
+            key,
+            {
+                "machine_id": key[0],
+                "project": key[1],
+                "file_path": key[2],
+                "snippet": "",
+                "score": 0.0,
+                "best_semantic_rank": 9999,
+                "entities": set(),
+            },
         )
+        entry["score"] += rrf
+        if not entry["snippet"]:
+            snippet = str(lexical.get("snippet", "")) or ""
+            if snippet:
+                entry["snippet"] = snippet[:500]
 
-    return sorted(merged.values(), key=lambda item: item.score, reverse=True)[:HYBRID_LIMIT]
+    out = [
+        SemanticSearchResult(
+            file_path=e["file_path"],
+            machine_id=e["machine_id"],
+            project=e["project"],
+            snippet=e["snippet"],
+            score=e["score"],
+            matched_entities=sorted(e["entities"]),
+        )
+        for e in by_file.values()
+    ]
+    # Stable secondary sort by file_path for deterministic ranking under
+    # tied RRF scores (acceptance: deterministic snapshot test).
+    out.sort(key=lambda r: r.file_path)
+    out.sort(key=lambda r: r.score, reverse=True)
+    return out[:HYBRID_LIMIT]
 
 
 def semantic_search_code(input_data: SemanticSearchInput) -> list[SemanticSearchResult]:

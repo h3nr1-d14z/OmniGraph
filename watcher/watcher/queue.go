@@ -1,7 +1,9 @@
 package watcher
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -108,6 +110,9 @@ func OpenQueue(path string) (*LocalQueue, error) {
 	if _, err := db.Exec("ALTER TABLE semantic_jobs ADD COLUMN lease_version INTEGER NOT NULL DEFAULT 0"); err != nil && !isDuplicateColumnError(err) {
 		return nil, err
 	}
+	if _, err := db.Exec("ALTER TABLE semantic_jobs ADD COLUMN replay_count INTEGER NOT NULL DEFAULT 0"); err != nil && !isDuplicateColumnError(err) {
+		return nil, err
+	}
 
 	return &LocalQueue{db: db}, nil
 }
@@ -119,8 +124,12 @@ func (q *LocalQueue) Enqueue(machineID, project string, events []models.FileEven
 		return err
 	}
 	_, err = q.db.Exec(
-		"INSERT INTO events (machine_id, project, payload, created_at) VALUES (?, ?, ?, ?)",
-		machineID, project, payload, time.Now().Unix(),
+		`INSERT INTO events (machine_id, project, payload, created_at)
+		 VALUES (:machine_id, :project, :payload, :created_at)`,
+		sql.Named("machine_id", machineID),
+		sql.Named("project", project),
+		sql.Named("payload", payload),
+		sql.Named("created_at", time.Now().Unix()),
 	)
 	return err
 }
@@ -128,7 +137,7 @@ func (q *LocalQueue) Enqueue(machineID, project string, events []models.FileEven
 // Dequeue retrieves up to limit pending batches.
 func (q *LocalQueue) Dequeue(limit int) ([]QueuedBatch, error) {
 	rows, err := q.db.Query(
-		"SELECT id, machine_id, project, payload FROM events ORDER BY created_at ASC LIMIT ?",
+		"SELECT id, machine_id, project, payload FROM events ORDER BY id ASC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -371,11 +380,52 @@ func (q *LocalQueue) DeleteSemanticJob(machineID, project, path string) error {
 	return err
 }
 
+// IncrementReplayCount bumps replay_count for a dead-letter job manually re-injected
+// via admin path. attempt_count is intentionally untouched (audit trail of original retries).
+func (q *LocalQueue) IncrementReplayCount(id int) error {
+	now := unixMilli()
+	_, err := q.db.Exec(
+		"UPDATE semantic_jobs SET replay_count = replay_count + 1, state = ?, next_attempt_at = ?, updated_at = ?, dead_at = NULL WHERE id = ?",
+		string(SemanticJobPending), now, now, id,
+	)
+	return err
+}
+
 func (q *LocalQueue) SemanticJobCount(state SemanticJobState) (int, error) {
 	var count int
 	row := q.db.QueryRow("SELECT COUNT(*) FROM semantic_jobs WHERE state = ?", string(state))
 	err := row.Scan(&count)
 	return count, err
+}
+
+// SemanticDeadErrorClassCounts groups dead jobs by a content-hash of their
+// last_error so reconcile can log error-class diversity without dumping
+// every full message. Returns a short hex prefix → count map.
+func (q *LocalQueue) SemanticDeadErrorClassCounts() (map[string]int, error) {
+	rows, err := q.db.Query(
+		"SELECT last_error FROM semantic_jobs WHERE state = ?",
+		string(SemanticJobDead),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]int)
+	for rows.Next() {
+		var msg string
+		if err := rows.Scan(&msg); err != nil {
+			return nil, err
+		}
+		// Short hash prefix as error-class identifier; keeps log compact.
+		sum := sha256.Sum256([]byte(msg))
+		key := hex.EncodeToString(sum[:4])
+		if msg == "" {
+			key = "empty"
+		}
+		out[key]++
+	}
+	return out, rows.Err()
 }
 
 func (job SemanticQueuedJob) WorkerJob() semanticworker.Job {

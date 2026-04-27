@@ -12,6 +12,7 @@ from qdrant_client.models import (
     MatchValue,
     PointIdsList,
     PointStruct,
+    SearchParams,
     VectorParams,
 )
 
@@ -41,7 +42,10 @@ class QdrantCodeStore:
             host=host or os.getenv("QDRANT_HOST", "localhost"),
             port=port or int(os.getenv("QDRANT_PORT", "6333")),
         )
-        self.collection = collection or os.getenv("QDRANT_COLLECTION", "omnigraph_code")
+        # Collection-per-model isolation. Default aligns with .env.example
+        # (`code_v1_nomic`) so deployments without an explicit env override
+        # still hit the legacy collection during/after the embedder cutover.
+        self.collection = collection or os.getenv("QDRANT_COLLECTION", "code_v1_nomic")
         self.vector_dim = vector_dim
         self._ensure_collection()
 
@@ -105,13 +109,18 @@ class QdrantCodeStore:
         project_scope: str | None = None,
         machine_id: str | None = None,
         limit: int = 10,
+        exact: bool = False,
     ) -> list[dict[str, Any]]:
+        # exact=True bypasses HNSW for deterministic ordering during
+        # baseline capture / regression testing. Default False preserves
+        # production ANN behaviour.
         results = self.client.query_points(
             collection_name=self.collection,
             query=query_vector,
             query_filter=self._build_filter(machine_id=machine_id, project=project_scope),
             limit=limit,
             with_payload=True,
+            search_params=SearchParams(exact=exact) if exact else None,
         )
         return [
             {

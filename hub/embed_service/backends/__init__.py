@@ -31,6 +31,10 @@ def get_backend(backend_name: str | None = None) -> BaseBackend:
         backend = MlxBackend()
     elif name == "onnx":
         backend = OnnxBackend()
+    elif name == "jina":
+        from .jina_code_backend import JinaCodeBackend
+
+        backend = JinaCodeBackend()
     else:
         # auto-detect
         system = platform.system().lower()

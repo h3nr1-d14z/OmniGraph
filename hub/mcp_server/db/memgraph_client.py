@@ -1,16 +1,35 @@
 """Memgraph graph client for code dependencies."""
 
 import os
-from typing import Any
+import random
+import time
+from typing import Any, Callable, TypeVar
 
 import neo4j
+from neo4j.exceptions import TransientError
 
 ALLOWED_RELATIONS = {"DEPENDS_ON", "CALLS", "IMPORTS", "IMPLEMENTS", "EXTENDS"}
+
+T = TypeVar("T")
 
 
 def _node_id(node: Any) -> str:
     data = dict(node)
-    return data.get("file_path") or data.get("path") or data.get("name", "")
+    file_path = data.get("file_path") or data.get("path")
+    name = data.get("name")
+    machine_id = data.get("machine_id", "")
+    parts: list[str] = []
+    if machine_id:
+        parts.append(machine_id)
+    if file_path and name:
+        parts.append(f"{file_path}#{name}")
+    elif file_path:
+        parts.append(file_path)
+    elif name:
+        parts.append(name)
+    else:
+        return ""
+    return ":".join(parts)
 
 
 def _node_kind(node: Any) -> str:
@@ -85,7 +104,7 @@ class MemgraphCodeGraph:
 
     def _ensure_schema(self) -> None:
         with self._driver.session() as session:
-            # Create indexes for fast lookups
+            # Per-property indexes (legacy lookups).
             session.run("CREATE INDEX ON :Entity(file_path)")
             session.run("CREATE INDEX ON :Entity(name)")
             session.run("CREATE INDEX ON :Entity(project)")
@@ -95,6 +114,28 @@ class MemgraphCodeGraph:
             session.run("CREATE INDEX ON :UnresolvedSymbol(name)")
             session.run("CREATE INDEX ON :ResolvedSymbol(symbol_id)")
             session.run("CREATE INDEX ON :ResolvedSymbol(name)")
+            # Composite index for the multi-tenant MERGE upsert path
+            # (machine_id + project + file_path + name). Without this,
+            # MERGE degrades to label scan once entity count grows.
+            session.run("CREATE INDEX ON :Entity(machine_id, project, file_path, name)")
+            # Composite uniqueness constraint guards against duplicate
+            # entities under concurrent MERGE writes (Memgraph docs warn
+            # MERGE alone is not unique). Wrapped in try/except because
+            # Memgraph raises if the constraint already exists or if
+            # pre-existing data violates uniqueness — in either case we
+            # log and continue so re-opening MemgraphCodeGraph stays
+            # idempotent. Operators must clean up duplicates manually.
+            try:
+                # Memgraph composite uniqueness: comma-separated property
+                # list (no parentheses, unlike some Neo4j flavours).
+                session.run(
+                    "CREATE CONSTRAINT ON (e:Entity) "
+                    "ASSERT e.machine_id, e.project, e.file_path, e.name IS UNIQUE"
+                )
+            except Exception as exc:
+                print(
+                    f"[memgraph] entity uniqueness constraint not applied: {exc}"
+                )
 
     def close(self) -> None:
         self._driver.close()
@@ -150,10 +191,9 @@ class MemgraphCodeGraph:
                 machine_id=machine_id,
             )
 
-    def upsert_entities(self, entities: list[dict[str, Any]]) -> None:
-        if not entities:
-            return
-        query = """
+    # Cypher fragment for entity upsert. Reused by upsert_entities (legacy
+    # auto-commit path) and atomic_replace_file (explicit transaction path).
+    _UPSERT_ENTITIES_CYPHER = """
         UNWIND $entities AS ent
         MERGE (f:File {path: ent.file_path, machine_id: ent.machine_id})
         SET f.project = ent.project,
@@ -168,10 +208,29 @@ class MemgraphCodeGraph:
         MERGE (f)-[r:CONTAINS]->(e)
         SET r.updated_at = timestamp()
         """
+
+    def upsert_entities(self, entities: list[dict[str, Any]]) -> None:
+        """DEPRECATED: prefer atomic_replace_file for per-file replacement.
+        Kept for backward compatibility with tests/direct callers."""
+        if not entities:
+            return
         with self._driver.session() as session:
-            session.run(query, entities=entities)
+            session.run(self._UPSERT_ENTITIES_CYPHER, entities=entities)
 
     def upsert_relations(self, relations: list[dict[str, Any]]) -> None:
+        """DEPRECATED: prefer atomic_replace_file for per-file replacement.
+        Kept for backward compatibility with tests/direct callers."""
+        if not relations:
+            return
+        with self._driver.session() as session:
+            self._run_upsert_relations(session, relations)
+
+    @staticmethod
+    def _run_upsert_relations(
+        runner: "neo4j.Session | neo4j.Transaction",
+        relations: list[dict[str, Any]],
+    ) -> None:
+        """Execute relation upsert Cypher against a session or open transaction."""
         if not relations:
             return
         imports = [rel for rel in relations if rel["type"] == "IMPORTS"]
@@ -180,149 +239,242 @@ class MemgraphCodeGraph:
         calls_resolved = [rel for rel in relations if rel["type"] == "CALLS_RESOLVED" and rel.get("source") and rel.get("symbol_id")]
         references = [rel for rel in relations if rel["type"] == "REFERENCES" and rel.get("source") and rel.get("symbol_id")]
         contains = [rel for rel in relations if rel["type"] == "CONTAINS"]
-        with self._driver.session() as session:
-            if imports:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
-                    SET f.project = rel.project,
-                        f.updated_at = timestamp()
-                    MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
-                    SET m.project = rel.project,
-                        m.language = "go",
-                        m.updated_at = timestamp()
-                    MERGE (f)-[r:IMPORTS]->(m)
-                    SET r.raw = rel.target,
-                        r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=imports,
-                )
-            if calls:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
-                    MERGE (target:UnresolvedSymbol {name: rel.target, machine_id: rel.machine_id})
-                    SET target.project = rel.project,
-                        target.updated_at = timestamp()
-                    MERGE (source)-[r:CALLS_SYNTAX]->(target)
-                    SET r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.layer = rel.layer,
-                        r.status = rel.status,
-                        r.target_ref = rel.target_ref,
-                        r.package = rel.package,
-                        r.language = rel.language,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=calls,
-                )
-            if imports_resolved:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
-                    SET f.project = rel.project,
-                        f.updated_at = timestamp()
-                    MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
-                    SET m.project = rel.project,
-                        m.language = rel.language,
-                        m.package = rel.package,
-                        m.updated_at = timestamp()
-                    MERGE (f)-[r:IMPORTS_RESOLVED]->(m)
-                    SET r.raw = rel.target,
-                        r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.layer = rel.layer,
-                        r.status = rel.status,
-                        r.target_ref = rel.target_ref,
-                        r.package = rel.package,
-                        r.language = rel.language,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=imports_resolved,
-                )
-            if calls_resolved:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
-                    MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
-                    SET target.project = rel.project,
-                        target.name = rel.target,
-                        target.package = rel.package,
-                        target.language = rel.language,
-                        target.target_ref = rel.target_ref,
-                        target.updated_at = timestamp()
-                    MERGE (source)-[r:CALLS_RESOLVED]->(target)
-                    SET r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.layer = rel.layer,
-                        r.status = rel.status,
-                        r.symbol_id = rel.symbol_id,
-                        r.target_ref = rel.target_ref,
-                        r.package = rel.package,
-                        r.language = rel.language,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=calls_resolved,
-                )
-            if references:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
-                    MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
-                    SET target.project = rel.project,
-                        target.name = rel.target,
-                        target.package = rel.package,
-                        target.language = rel.language,
-                        target.target_ref = rel.target_ref,
-                        target.updated_at = timestamp()
-                    MERGE (source)-[r:REFERENCES]->(target)
-                    SET r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.layer = rel.layer,
-                        r.status = rel.status,
-                        r.symbol_id = rel.symbol_id,
-                        r.target_ref = rel.target_ref,
-                        r.package = rel.package,
-                        r.language = rel.language,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=references,
-                )
-            if contains:
-                session.run(
-                    """
-                    UNWIND $relations AS rel
-                    MATCH (f:File {path: rel.file_path, machine_id: rel.machine_id})
-                    MATCH (e:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.target})
-                    MERGE (f)-[r:CONTAINS]->(e)
-                    SET r.line = rel.line,
-                        r.confidence = rel.confidence,
-                        r.updated_at = timestamp()
-                    """,
-                    relations=contains,
-                )
+        if imports:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                SET f.project = rel.project,
+                    f.updated_at = timestamp()
+                MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
+                SET m.project = rel.project,
+                    m.language = "go",
+                    m.updated_at = timestamp()
+                MERGE (f)-[r:IMPORTS]->(m)
+                SET r.raw = rel.target,
+                    r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.updated_at = timestamp()
+                """,
+                relations=imports,
+            )
+        if calls:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                MERGE (target:UnresolvedSymbol {name: rel.target, machine_id: rel.machine_id})
+                SET target.project = rel.project,
+                    target.updated_at = timestamp()
+                MERGE (source)-[r:CALLS_SYNTAX]->(target)
+                SET r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.layer = rel.layer,
+                    r.status = rel.status,
+                    r.target_ref = rel.target_ref,
+                    r.package = rel.package,
+                    r.language = rel.language,
+                    r.updated_at = timestamp()
+                """,
+                relations=calls,
+            )
+        if imports_resolved:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MERGE (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                SET f.project = rel.project,
+                    f.updated_at = timestamp()
+                MERGE (m:Module {name: rel.target, machine_id: rel.machine_id})
+                SET m.project = rel.project,
+                    m.language = rel.language,
+                    m.package = rel.package,
+                    m.updated_at = timestamp()
+                MERGE (f)-[r:IMPORTS_RESOLVED]->(m)
+                SET r.raw = rel.target,
+                    r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.layer = rel.layer,
+                    r.status = rel.status,
+                    r.target_ref = rel.target_ref,
+                    r.package = rel.package,
+                    r.language = rel.language,
+                    r.updated_at = timestamp()
+                """,
+                relations=imports_resolved,
+            )
+        if calls_resolved:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
+                SET target.project = rel.project,
+                    target.name = rel.target,
+                    target.package = rel.package,
+                    target.language = rel.language,
+                    target.target_ref = rel.target_ref,
+                    target.updated_at = timestamp()
+                MERGE (source)-[r:CALLS_RESOLVED]->(target)
+                SET r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.layer = rel.layer,
+                    r.status = rel.status,
+                    r.symbol_id = rel.symbol_id,
+                    r.target_ref = rel.target_ref,
+                    r.package = rel.package,
+                    r.language = rel.language,
+                    r.updated_at = timestamp()
+                """,
+                relations=calls_resolved,
+            )
+        if references:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MATCH (source:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.source})
+                MERGE (target:ResolvedSymbol {symbol_id: rel.symbol_id, machine_id: rel.machine_id})
+                SET target.project = rel.project,
+                    target.name = rel.target,
+                    target.package = rel.package,
+                    target.language = rel.language,
+                    target.target_ref = rel.target_ref,
+                    target.updated_at = timestamp()
+                MERGE (source)-[r:REFERENCES]->(target)
+                SET r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.layer = rel.layer,
+                    r.status = rel.status,
+                    r.symbol_id = rel.symbol_id,
+                    r.target_ref = rel.target_ref,
+                    r.package = rel.package,
+                    r.language = rel.language,
+                    r.updated_at = timestamp()
+                """,
+                relations=references,
+            )
+        if contains:
+            runner.run(
+                """
+                UNWIND $relations AS rel
+                MATCH (f:File {path: rel.file_path, machine_id: rel.machine_id})
+                MATCH (e:Entity {file_path: rel.file_path, machine_id: rel.machine_id, name: rel.target})
+                MERGE (f)-[r:CONTAINS]->(e)
+                SET r.line = rel.line,
+                    r.confidence = rel.confidence,
+                    r.updated_at = timestamp()
+                """,
+                relations=contains,
+            )
 
-    def delete_file(self, file_path: str, machine_id: str) -> None:
-        """Tombstone: delete file, entities, and their edges."""
-        query = """
+    # Cypher fragments shared between delete_file (auto-commit) and
+    # atomic_replace_file (explicit transaction).
+    _DELETE_ENTITIES_CYPHER = """
         MATCH (e:Entity {file_path: $file_path, machine_id: $machine_id})
         DETACH DELETE e
         """
-        file_query = """
+    _DELETE_FILE_CYPHER = """
         MATCH (f:File {path: $file_path, machine_id: $machine_id})
         DETACH DELETE f
         """
+    _PRUNE_ORPHANS_CYPHER = """
+        MATCH (n {machine_id: $machine_id})
+        WHERE (n:Module OR n:UnresolvedSymbol OR n:ResolvedSymbol) AND NOT (n)--()
+        DELETE n
+        """
+
+    def delete_file(self, file_path: str, machine_id: str) -> None:
+        """Tombstone: delete file, entities, and their edges.
+
+        DEPRECATED for the upsert path: prefer atomic_replace_file. Still used
+        by RENAME/DELETE event handling and tests that need standalone deletion.
+        """
         with self._driver.session() as session:
-            session.run(query, file_path=file_path, machine_id=machine_id)
-            session.run(file_query, file_path=file_path, machine_id=machine_id)
-            self._prune_orphans(session, machine_id)
+            session.run(self._DELETE_ENTITIES_CYPHER, file_path=file_path, machine_id=machine_id)
+            session.run(self._DELETE_FILE_CYPHER, file_path=file_path, machine_id=machine_id)
+            session.run(self._PRUNE_ORPHANS_CYPHER, machine_id=machine_id)
+
+    def atomic_replace_file(
+        self,
+        file_path: str,
+        machine_id: str,
+        entities: list[dict[str, Any]],
+        relations: list[dict[str, Any]],
+    ) -> None:
+        """Replace a file's graph state in one explicit transaction.
+
+        Steps inside one tx: delete the file's existing entities + File node +
+        prune orphans, then MERGE the new entities and relations. Per-file
+        granularity keeps the lock window narrow. Retries on TransientError
+        (Memgraph pessimistic conflict detection) with exponential backoff +
+        jitter, max 3 attempts. Re-raises on the final failure so the caller
+        (api_server batch handler) can surface a 5xx and let the watcher
+        outbox retry the batch.
+        """
+
+        def _do_replace() -> None:
+            with self._driver.session() as session:
+                tx = session.begin_transaction()
+                try:
+                    tx.run(
+                        self._DELETE_ENTITIES_CYPHER,
+                        file_path=file_path,
+                        machine_id=machine_id,
+                    )
+                    tx.run(
+                        self._DELETE_FILE_CYPHER,
+                        file_path=file_path,
+                        machine_id=machine_id,
+                    )
+                    tx.run(self._PRUNE_ORPHANS_CYPHER, machine_id=machine_id)
+                    if entities:
+                        tx.run(self._UPSERT_ENTITIES_CYPHER, entities=entities)
+                    self._run_upsert_relations(tx, relations)
+                    tx.commit()
+                except Exception:
+                    # Closing the transaction without a commit rolls back; we
+                    # call rollback explicitly to surface any rollback error
+                    # instead of relying on close() side-effects.
+                    try:
+                        tx.rollback()
+                    except Exception:
+                        pass
+                    raise
+
+        self._with_retry(_do_replace)
+
+    @staticmethod
+    def _with_retry(
+        func: Callable[[], T],
+        max_attempts: int = 3,
+        base_delay_ms: float = 50.0,
+    ) -> T:
+        """Run func, retrying on TransientError with exponential backoff + jitter.
+
+        Memgraph raises TransientError when its pessimistic conflict detection
+        aborts an in-flight transaction. The backoff sleep is
+        ``base_delay_ms * 2**attempt`` plus uniform jitter up to base_delay_ms.
+        """
+        attempt = 0
+        while True:
+            try:
+                return func()
+            except TransientError as exc:
+                attempt += 1
+                if attempt >= max_attempts:
+                    print(
+                        f"[memgraph] atomic_replace_file giving up after "
+                        f"{attempt} attempts: {exc}"
+                    )
+                    raise
+                delay_ms = base_delay_ms * (2 ** (attempt - 1)) + random.uniform(
+                    0, base_delay_ms
+                )
+                print(
+                    f"[memgraph] atomic_replace_file TransientError on attempt "
+                    f"{attempt}/{max_attempts}, retrying in {delay_ms:.1f}ms: {exc}"
+                )
+                time.sleep(delay_ms / 1000.0)
 
     def delete_machine(self, machine_id: str) -> None:
         """Remove all graph nodes for a machine."""

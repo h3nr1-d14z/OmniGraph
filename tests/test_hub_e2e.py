@@ -151,18 +151,26 @@ def test_build_embedding_chunks_by_symbol_range():
 
 class _FakeMemgraph:
     def __init__(self):
-        self.entities = None
-        self.relations = None
+        self.entities: list = []
+        self.relations: list = []
         self.deleted = []
 
     def delete_file(self, file_path, machine_id):
         self.deleted.append((file_path, machine_id))
 
     def upsert_entities(self, entities):
-        self.entities = entities
+        self.entities.extend(entities)
 
     def upsert_relations(self, relations):
-        self.relations = relations
+        self.relations.extend(relations)
+
+    def atomic_replace_file(self, file_path, machine_id, entities, relations):
+        # Mirror the real client: delete + entity upsert + relation upsert,
+        # all observable on existing fake attributes so legacy assertions
+        # continue to work under the US-014 atomic path.
+        self.deleted.append((file_path, machine_id))
+        self.entities.extend(entities)
+        self.relations.extend(relations)
 
 
 class _FakeContent:
@@ -170,15 +178,20 @@ class _FakeContent:
         self.files = None
         self.refreshed = None
         self.deleted = []
+        self.hash_writes = []
 
-    def upsert_files(self, files):
+    def upsert_files(self, files, content_hashes=None):
         self.files = files
+        self.last_hashes = content_hashes or {}
 
     def delete_file(self, machine_id, file_path):
         self.deleted.append((machine_id, file_path))
 
     def refresh_project_tree(self, machine_id, project):
         self.refreshed = (machine_id, project)
+
+    def update_content_hash(self, machine_id, file_path, content_hash):
+        self.hash_writes.append((machine_id, file_path, content_hash))
 
 
 class _FakeQdrant:
@@ -220,7 +233,14 @@ def test_handle_upserts_passes_graph_relations():
     )
 
     import asyncio
-    asyncio.run(_handle_upserts([ev], "m1", "demo", qdrant, memgraph, content, _FakeHTTP()))
+    import pytest as _pytest
+    from fastapi import HTTPException as _HTTPException
+    # US-004: embed failure now raises 502 (was silently swallowed). Graph +
+    # content writes still committed BEFORE the exception per partial-success
+    # contract; the test verifies that contract.
+    with _pytest.raises(_HTTPException) as excinfo:
+        asyncio.run(_handle_upserts([ev], "m1", "demo", qdrant, memgraph, content, _FakeHTTP()))
+    assert excinfo.value.status_code == 502
 
     assert qdrant.deleted == [("/src/main.go", "m1")]
     assert memgraph.deleted == [("/src/main.go", "m1")]
@@ -595,7 +615,7 @@ def test_memgraph():
         ]
     )
     graph_deps = graph.get_dependencies("GraphMain", direction="downstream", machine_id=machine_id)
-    assert any(edge["relation"] == "CALLS_SYNTAX" and edge["to"] == "fmt.Println" for edge in graph_deps["edges"]), graph_deps
+    assert any(edge["relation"] == "CALLS_SYNTAX" and edge["to"].endswith(":fmt.Println") for edge in graph_deps["edges"]), graph_deps
     assert any(edge["relation"] == "CALLS_RESOLVED" and edge["symbol_id"] == "go:fmt.Println" for edge in graph_deps["edges"]), graph_deps
     assert any(edge["relation"] == "REFERENCES" and edge["to_type"] == "ResolvedSymbol" for edge in graph_deps["edges"]), graph_deps
     assert any(edge["relation"] == "IMPORTS_RESOLVED" for edge in graph_deps["edges"]), graph_deps

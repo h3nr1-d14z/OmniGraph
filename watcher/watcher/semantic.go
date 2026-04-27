@@ -236,7 +236,7 @@ func (dw *DebouncedWatcher) signalSemantic() {
 func (dw *DebouncedWatcher) isLatestSemanticJob(job semanticworker.Job) bool {
 	dw.mu.Lock()
 	defer dw.mu.Unlock()
-	latest := dw.lastContentHash[job.Path]
+	latest := dw.lastContentHash.get(job.Path)
 	return latest == "" || latest == job.ContentHash
 }
 

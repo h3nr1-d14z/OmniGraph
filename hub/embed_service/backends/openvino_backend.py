@@ -52,3 +52,9 @@ class OpenVinoBackend(OnnxBackend):
     @property
     def name(self) -> str:
         return f"openvino-{self.model_name}"
+
+    # Explicit pass-through documenting that OpenVINO inherits the nomic
+    # prefix contract from OnnxBackend. Avoids "is the parent's contract
+    # the right one for this backend?" doubt at the call site.
+    def format_input(self, texts: list[str], mode: str) -> list[str]:
+        return super().format_input(texts, mode)

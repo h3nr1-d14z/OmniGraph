@@ -384,16 +384,41 @@ def test_machine_scoped_search():
 
 
 def test_symbol_chunks_same_file_are_preserved():
+    """US-011 changed semantics: same-file symbol chunks now collapse to ONE
+    file-level entry under RRF (the merge collapses duplicates per file).
+    Per-symbol chunks remain in Qdrant — verify that directly. The user-facing
+    semantic_search_code surfaces top-1 file with snippet from the highest-
+    ranked semantic chunk."""
     ensure_seeded()
-    print("[test] same-file symbol chunks preserved...")
+    print("[test] same-file symbol chunks preserved (Qdrant payload check)...")
+    from db.qdrant_client import get_qdrant
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    qdrant = get_qdrant()
+    # Seed paths use the conventional relative form, not FIXTURES absolute.
+    seeded_path = "/tests/fixtures/project_a/src/model.go"
+    points, _ = qdrant.client.scroll(
+        collection_name=qdrant.collection,
+        scroll_filter=Filter(
+            must=[
+                FieldCondition(key="machine_id", match=MatchValue(value=MACHINE_ID)),
+                FieldCondition(key="file_path", match=MatchValue(value=seeded_path)),
+            ]
+        ),
+        limit=20,
+        with_payload=True,
+        with_vectors=False,
+    )
+    snippets = "\n".join((p.payload or {}).get("snippet", "") for p in points)
+    assert "type User struct" in snippets, f"User struct chunk missing in Qdrant: {snippets[:200]}"
+    assert "HashPassword" in snippets, f"HashPassword chunk missing in Qdrant: {snippets[:200]}"
+
+    # Also verify the file-level RRF surfaces model.go in top results.
     from models.schema import SemanticSearchInput
     from tools.semantic_search import semantic_search_code
-
     inp = SemanticSearchInput(query="User password hash", project_scope="project_a", machine_id=MACHINE_ID)
     results = semantic_search_code(inp)
-    snippets = "\n".join(r.snippet for r in results if r.file_path.endswith("model.go"))
-    assert "type User struct" in snippets, snippets
-    assert "HashPassword" in snippets, snippets
+    assert any(r.file_path.endswith("model.go") for r in results), [r.file_path for r in results]
     print("[test] same-file symbol chunks preserved OK")
 
 

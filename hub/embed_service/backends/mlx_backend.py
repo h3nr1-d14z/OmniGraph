@@ -54,13 +54,16 @@ class MlxBackend(BaseBackend):
     def vector_dim(self) -> int:
         return self._dim
 
+    def format_input(self, texts: list[str], mode: str) -> list[str]:
+        return prefix_texts(texts, mode)
+
     def embed(self, texts: list[str], mode: str = "document") -> np.ndarray:
         if not texts:
             return np.zeros((0, self._dim), dtype=np.float32)
 
-        texts = prefix_texts(texts, mode)
+        texts = self.format_input(texts, mode)
         inputs = self._tokenizer(
-            texts, return_tensors="np", padding=True, truncation=True
+            texts, return_tensors="np", padding=True, truncation=True, max_length=8192
         )
         import mlx.core as mx
 
