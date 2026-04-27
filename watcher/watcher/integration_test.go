@@ -479,7 +479,7 @@ func TestDrainQueueEnqueuesSemanticAfterSuccessfulReplay(t *testing.T) {
 		ContentHash: "hash-1",
 		Content:     "package main\nfunc main() {}\n",
 	}}
-	if err := queue.Enqueue(cfg.MachineID, "demo", events); err != nil {
+	if err := queue.Enqueue(context.Background(), cfg.MachineID, "demo", events); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := dw.DrainQueue(); err != nil {
@@ -1206,7 +1206,7 @@ func TestQueueStatsServerHandlerReturnsStateCounts(t *testing.T) {
 	if err := q.UpsertSemanticJob(job, 3); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	if err := q.Enqueue("m1", "p", []models.FileEvent{{Type: models.EventCreate, Path: "/r/y.go"}}); err != nil {
+	if err := q.Enqueue(context.Background(), "m1", "p", []models.FileEvent{{Type: models.EventCreate, Path: "/r/y.go"}}); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -1257,7 +1257,7 @@ func TestQueueStatsServerEmptyAddrDisablesServer(t *testing.T) {
 	}
 }
 
-//Reconciler.Tick reports dead-row count and per-error-class
+// Reconciler.Tick reports dead-row count and per-error-class
 // breakdown. Force one job to dead state, verify Tick observes count > 0.
 func TestReconcileReportsDeadRowCount(t *testing.T) {
 	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
@@ -1303,7 +1303,7 @@ func TestReconcileReportsDeadRowCount(t *testing.T) {
 	}
 }
 
-//log dedup — when (deadCount, errorClasses) is unchanged
+// log dedup — when (deadCount, errorClasses) is unchanged
 // across consecutive ticks, digest should match (forcing log suppression).
 func TestReconcileDigestStableAcrossTicksWhenStateUnchanged(t *testing.T) {
 	d1 := reconcileDigest(3, map[string]int{"abc": 2, "def": 1})
@@ -1317,7 +1317,7 @@ func TestReconcileDigestStableAcrossTicksWhenStateUnchanged(t *testing.T) {
 	}
 }
 
-//replay_count audit trail — admin replay increments
+// replay_count audit trail — admin replay increments
 // replay_count without touching attempt_count. (Companion test to
 // TestIncrementReplayCountAuditPreserved which targets the queue method
 // directly.) This one targets a dead row specifically.
@@ -1371,7 +1371,7 @@ func TestAdminReplayResurrectsDeadRow(t *testing.T) {
 	}
 }
 
-//addRecursive emits synthetic Create events for files
+// addRecursive emits synthetic Create events for files
 // already on disk at scan time (catch-up scan). Without this fix, files
 // created BEFORE watcher startup OR inside a freshly-created subdir during
 // the Add()→list-contents window would be missed.
@@ -1406,7 +1406,7 @@ func TestAddRecursiveEmitsCatchUpForExistingFiles(t *testing.T) {
 	})
 }
 
-//race-safe catch-up — files created concurrently during
+// race-safe catch-up — files created concurrently during
 // addRecursive are not lost. We pre-populate then continue creating during
 // the watcher's startup window.
 func TestAddRecursiveCatchUpUnderConcurrentCreation(t *testing.T) {
@@ -1459,7 +1459,7 @@ func TestAddRecursiveCatchUpUnderConcurrentCreation(t *testing.T) {
 	})
 }
 
-//lastContentHash is FIFO-bounded; oldest entries evict
+// lastContentHash is FIFO-bounded; oldest entries evict
 // after limit. 60k inserts on a 50k cap leaves exactly 50k, with first 10k
 // gone and most-recent 50k retained.
 func TestLastContentHashLRUEviction(t *testing.T) {
@@ -1504,7 +1504,7 @@ func TestBoundedHashMapDeleteAllowsReinsert(t *testing.T) {
 	}
 }
 
-//stable Dequeue order even when created_at is shared
+// stable Dequeue order even when created_at is shared
 // (second-resolution time.Now().Unix() ties → must rely on id ASC for ordering).
 func TestDequeueStableOrderUnderSharedCreatedAt(t *testing.T) {
 	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
@@ -1515,7 +1515,7 @@ func TestDequeueStableOrderUnderSharedCreatedAt(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		ev := []models.FileEvent{{Type: models.EventCreate, Path: fmt.Sprintf("/f%d.go", i)}}
-		if err := q.Enqueue("m1", "p1", ev); err != nil {
+		if err := q.Enqueue(context.Background(), "m1", "p1", ev); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
@@ -1538,7 +1538,7 @@ func TestDequeueStableOrderUnderSharedCreatedAt(t *testing.T) {
 	}
 }
 
-//replay_count column exists with default 0; IncrementReplayCount
+// replay_count column exists with default 0; IncrementReplayCount
 // bumps replay_count without touching attempt_count (audit trail preserved).
 func TestIncrementReplayCountAuditPreserved(t *testing.T) {
 	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
@@ -1593,7 +1593,7 @@ func TestIncrementReplayCountAuditPreserved(t *testing.T) {
 	}
 }
 
-//schema migration is idempotent — opening existing DB twice
+// schema migration is idempotent — opening existing DB twice
 // must not error on duplicate replay_count column.
 func TestOpenQueueIdempotentReplayCountMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queue.db")
@@ -1622,7 +1622,7 @@ func TestLocalQueue_EnqueueDequeue(t *testing.T) {
 		{Type: models.EventCreate, Path: "/a.go"},
 		{Type: models.EventModify, Path: "/b.go"},
 	}
-	if err := q.Enqueue("m1", "p1", events); err != nil {
+	if err := q.Enqueue(context.Background(), "m1", "p1", events); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 

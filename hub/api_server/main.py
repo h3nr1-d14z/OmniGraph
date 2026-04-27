@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import unicodedata
 from contextlib import asynccontextmanager
 
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "mcp_server"))
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), ".."))
 
+from latency import get_tracker, route_label  # noqa: E402
 from logging_config import configure_logging  # noqa: E402
 
 logger = structlog.get_logger(__name__)
@@ -22,6 +24,11 @@ from db.content_store import ContentStore, get_store
 from db.memgraph_client import MemgraphCodeGraph, get_memgraph
 from db.qdrant_client import QdrantCodeStore, get_qdrant
 from models.event import FileEvent  # type: ignore
+
+LATENCY = get_tracker()
+# Routes excluded from request-latency middleware: /health is too cheap to
+# meter and /stats reads the snapshot itself (would inflate its own p99).
+LATENCY_SKIP_PATHS = frozenset({"/health", "/stats"})
 
 EMBED_URL = os.getenv("EMBED_SERVICE_URL", "http://localhost:8000")
 AUTH_TOKEN = os.getenv("HUB_AUTH_TOKEN", "changeme")
@@ -74,6 +81,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OmniGraph Hub API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def latency_middleware(request: Request, call_next):
+    if request.url.path in LATENCY_SKIP_PATHS:
+        return await call_next(request)
+    start = time.perf_counter()
+    try:
+        return await call_next(request)
+    finally:
+        LATENCY.record(route_label(request.scope), (time.perf_counter() - start) * 1000.0)
 
 
 def _verify_auth(request: Request) -> None:
@@ -352,10 +370,11 @@ async def _handle_upserts(
         all_vectors: list[list[float]] = []
         for start in range(0, len(chunks), MAX_CHUNKS_PER_REQUEST):
             sub = chunks[start : start + MAX_CHUNKS_PER_REQUEST]
-            r = await http.post(
-                f"{EMBED_URL}/embed",
-                json={"texts": [str(chunk["text"]) for chunk in sub], "mode": "document"},
-            )
+            with LATENCY.track("embed_call"):
+                r = await http.post(
+                    f"{EMBED_URL}/embed",
+                    json={"texts": [str(chunk["text"]) for chunk in sub], "mode": "document"},
+                )
             r.raise_for_status()
             all_vectors.extend(r.json()["embeddings"])
 
@@ -474,6 +493,7 @@ async def stats(request: Request, machine_id: str | None = None, project: str | 
     )
     # Optional watcher /queue/stats integration. Null on failure — never 5xx.
     response["watcher_queue"] = await _fetch_watcher_queue_stats(request.app.state.http)
+    response["latency"] = LATENCY.snapshot()
     return response
 
 

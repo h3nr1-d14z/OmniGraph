@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -117,13 +118,15 @@ func OpenQueue(path string) (*LocalQueue, error) {
 	return &LocalQueue{db: db}, nil
 }
 
-// Enqueue stores events for later delivery.
-func (q *LocalQueue) Enqueue(machineID, project string, events []models.FileEvent) error {
+// Enqueue stores events for later delivery. The context bounds how long the
+// caller is willing to wait when SQLite is busy; fsnotify must not stall on a
+// slow disk.
+func (q *LocalQueue) Enqueue(ctx context.Context, machineID, project string, events []models.FileEvent) error {
 	payload, err := json.Marshal(events)
 	if err != nil {
 		return err
 	}
-	_, err = q.db.Exec(
+	_, err = q.db.ExecContext(ctx,
 		`INSERT INTO events (machine_id, project, payload, created_at)
 		 VALUES (:machine_id, :project, :payload, :created_at)`,
 		sql.Named("machine_id", machineID),
@@ -222,7 +225,8 @@ func (q *LocalQueue) UpsertSemanticJob(job semanticworker.Job, maxRetries int) e
 			last_error = '',
 			updated_at = excluded.updated_at,
 			done_at = NULL,
-			dead_at = NULL
+			dead_at = NULL,
+			replay_count = 0
 		WHERE semantic_jobs.content_hash != excluded.content_hash`,
 		job.MachineID, job.Project, job.Root, job.Path, job.ContentHash, job.Content,
 		string(SemanticJobPending), maxRetries, now, now, now,
@@ -378,6 +382,51 @@ func (q *LocalQueue) DeleteSemanticJob(machineID, project, path string) error {
 		machineID, project, path,
 	)
 	return err
+}
+
+// ReplayCandidate identifies a dead semantic job eligible for auto-replay.
+// last_error is exposed so the reconciler can apply transient-error
+// classification before deciding whether to bump replay_count.
+type ReplayCandidate struct {
+	ID        int
+	LastError string
+}
+
+// ListReplayCandidates returns dead semantic jobs whose dead_at is older
+// than nowMs-minAgeMs and replay_count < maxReplay, capped at limit rows.
+// afterID is a cursor — pass 0 on the first call, then the highest ID from
+// the previous page to skip past non-replayable jobs (the reconciler uses
+// this to avoid getting stuck behind a page of non-transient errors).
+// Ordered by id ASC so the cursor monotonically advances; dead_at is the
+// gate but id is the deterministic page key.
+func (q *LocalQueue) ListReplayCandidates(afterID int, nowMs int64, minAgeMs int64, maxReplay int, limit int) ([]ReplayCandidate, error) {
+	cutoff := nowMs - minAgeMs
+	rows, err := q.db.Query(
+		`SELECT id, last_error
+		   FROM semantic_jobs
+		  WHERE state = ?
+		    AND replay_count < ?
+		    AND dead_at IS NOT NULL
+		    AND dead_at <= ?
+		    AND id > ?
+		  ORDER BY id ASC
+		  LIMIT ?`,
+		string(SemanticJobDead), maxReplay, cutoff, afterID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ReplayCandidate
+	for rows.Next() {
+		var c ReplayCandidate
+		if err := rows.Scan(&c.ID, &c.LastError); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // IncrementReplayCount bumps replay_count for a dead-letter job manually re-injected

@@ -44,6 +44,15 @@ type WatcherConfig struct {
 		// Dead-letter reconciliation cadence (REPORT-ONLY).
 		// 0 = disabled; default 3600 (1h) on first Load() if unset.
 		ReconcileIntervalSec int `yaml:"reconcile_interval_sec"`
+		// Auto-replay of transient-error dead jobs at each reconcile tick.
+		// Disabled = report-only mode. When enabled, dead jobs whose last
+		// error matches a transient class (timeout, conn refused, 5xx) and
+		// have replay_count < MaxCount and dead_at older than MinAgeSec are
+		// re-queued via IncrementReplayCount.
+		AutoReplayEnabled   bool `yaml:"auto_replay_enabled"`
+		AutoReplayMinAgeSec int  `yaml:"auto_replay_min_age_sec"`
+		AutoReplayMaxCount  int  `yaml:"auto_replay_max_count"`
+		AutoReplayBatchSize int  `yaml:"auto_replay_batch_size"`
 	} `yaml:"semantic"`
 
 	Ignore struct {
@@ -62,6 +71,14 @@ const DefaultReconcileIntervalSec = 3600
 // SemanticDeadRowSoftCap triggers a warning log when dead-row count exceeds
 // this; signals operator attention without aborting watcher.
 const SemanticDeadRowSoftCap = 1000
+
+// Default auto-replay knobs. Conservative: jobs must dwell dead 10 min
+// before replay, max 3 auto-replays, scan ≤50 candidates per tick.
+const (
+	DefaultAutoReplayMinAgeSec = 600
+	DefaultAutoReplayMaxCount  = 3
+	DefaultAutoReplayBatchSize = 50
+)
 
 var DefaultProjectMarkers = []string{
 	".git",
@@ -130,6 +147,19 @@ func Load(path string) (*WatcherConfig, error) {
 	}
 	if !hasYAMLPath(data, "semantic", "reconcile_interval_sec") {
 		cfg.Semantic.ReconcileIntervalSec = DefaultReconcileIntervalSec
+	}
+	// Use hasYAMLPath so an explicit `auto_replay_min_age_sec: 0` (immediate
+	// replay, e.g. for tests) is preserved rather than silently overwritten
+	// with the default. Same pattern as cache_size / reconcile_interval_sec
+	// just above.
+	if !hasYAMLPath(data, "semantic", "auto_replay_min_age_sec") {
+		cfg.Semantic.AutoReplayMinAgeSec = DefaultAutoReplayMinAgeSec
+	}
+	if !hasYAMLPath(data, "semantic", "auto_replay_max_count") {
+		cfg.Semantic.AutoReplayMaxCount = DefaultAutoReplayMaxCount
+	}
+	if !hasYAMLPath(data, "semantic", "auto_replay_batch_size") {
+		cfg.Semantic.AutoReplayBatchSize = DefaultAutoReplayBatchSize
 	}
 	if cfg.AutoDetect == false && cfg.ProjectName == "" {
 		cfg.AutoDetect = true // default to auto-detect

@@ -35,7 +35,7 @@ def semantic_search_code_tool(query: str, project_scope: str | None = None, mach
     """
     inp = SemanticSearchInput(query=query, project_scope=project_scope, machine_id=machine_id)
     results = semantic_search_code(inp)
-    return json.dumps([r.model_dump() for r in results], indent=2, ensure_ascii=False)
+    return json.dumps([r.model_dump() for r in results], separators=(",", ":"), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -49,7 +49,7 @@ def get_dependency_graph_tool(entity_name: str, direction: str, machine_id: str 
     """
     inp = DependencyGraphInput(entity_name=entity_name, direction=direction, machine_id=machine_id)
     result = get_dependency_graph(inp)
-    return json.dumps(result.model_dump(), indent=2, ensure_ascii=False)
+    return json.dumps(result.model_dump(), separators=(",", ":"), ensure_ascii=False)
 
 
 @mcp.tool()

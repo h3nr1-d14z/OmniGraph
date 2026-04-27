@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,11 @@ import (
 )
 
 const maxFileSize = 500 * 1024
+
+// enqueueTimeout caps how long fsnotify will wait for SQLite when the
+// queue is busy; missing the window logs a warning and drops the batch
+// (acceptable since fs events get re-emitted on the next debounce tick).
+const enqueueTimeout = 2 * time.Second
 
 // lastContentHash cap prevents unbounded growth on long-running watchers.
 // Files moved out of watch tree (rm -rf parent, FS unmount) leave orphan
@@ -431,8 +437,18 @@ func (dw *DebouncedWatcher) sendOrQueue(project string, events []models.FileEven
 		if dw.queue == nil {
 			return false
 		}
-		if qerr := dw.queue.Enqueue(dw.cfg.MachineID, project, events); qerr != nil {
-			slog.Error("queue_error", "err", qerr)
+		enqueueCtx, cancel := context.WithTimeout(context.Background(), enqueueTimeout)
+		qerr := dw.queue.Enqueue(enqueueCtx, dw.cfg.MachineID, project, events)
+		cancel()
+		if qerr != nil {
+			// Distinguish "SQLite slow / busy" (ctx deadline) from "schema
+			// or disk error" so operators can tell disk pressure from a
+			// real corruption — both used to log identically.
+			if errors.Is(qerr, context.DeadlineExceeded) {
+				slog.Warn("queue_enqueue_timeout", "timeout", enqueueTimeout, "err", qerr)
+			} else {
+				slog.Error("queue_error", "err", qerr)
+			}
 			return false
 		}
 		dw.markDurable(events)

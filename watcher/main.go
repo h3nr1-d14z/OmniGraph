@@ -92,7 +92,12 @@ func runReplay() {
 	fmt.Printf("replayed semantic_jobs id=%d (state=pending, replay_count incremented; attempt_count untouched)\n", *id)
 }
 
-func runInit() {
+// defaultInitConfig builds the seed WatcherConfig that `watcher init`
+// writes to disk. Extracted so tests can assert non-zero defaults for
+// every numeric field — Codex review (2026-04) caught a regression
+// where new auto-replay knobs were serialized as 0, then later treated
+// as explicit-zero by hasYAMLPath() and replay was silently disabled.
+func defaultInitConfig() *config.WatcherConfig {
 	cfg := &config.WatcherConfig{}
 	cfg.MachineID = "dev-machine-01"
 	cfg.WatchRoot = "~/Projects/your-repo"
@@ -112,9 +117,17 @@ func runInit() {
 	cfg.Semantic.MaxRetries = 3
 	cfg.Semantic.CacheSize = config.DefaultSemanticCacheSize
 	cfg.Semantic.ReconcileIntervalSec = config.DefaultReconcileIntervalSec
+	cfg.Semantic.AutoReplayEnabled = true
+	cfg.Semantic.AutoReplayMinAgeSec = config.DefaultAutoReplayMinAgeSec
+	cfg.Semantic.AutoReplayMaxCount = config.DefaultAutoReplayMaxCount
+	cfg.Semantic.AutoReplayBatchSize = config.DefaultAutoReplayBatchSize
 	cfg.Ignore.GitIgnore = true
 	cfg.Ignore.DockerIgnore = true
+	return cfg
+}
 
+func runInit() {
+	cfg := defaultInitConfig()
 	path := config.DefaultConfigPath()
 	if err := cfg.Save(path); err != nil {
 		slog.Error("config_write_failed", "err", err)
@@ -246,7 +259,18 @@ func runWatch() {
 	reconcileCtx, reconcileCancel := context.WithCancel(context.Background())
 	defer reconcileCancel()
 	if cfg.Semantic.ReconcileIntervalSec > 0 {
-		reconciler := watcher.NewReconciler(queue, time.Duration(cfg.Semantic.ReconcileIntervalSec)*time.Second)
+		// Auto-replay must NOT activate when the semantic worker is
+		// disabled: moving rows from dead → pending without a consumer
+		// hides them from dead-letter stats while leaving them stuck in
+		// pending forever. Gate strictly on cfg.Semantic.Enabled.
+		autoReplay := watcher.AutoReplayPolicy{
+			Enabled:   cfg.Semantic.Enabled && cfg.Semantic.AutoReplayEnabled,
+			MinAge:    time.Duration(cfg.Semantic.AutoReplayMinAgeSec) * time.Second,
+			MaxCount:  cfg.Semantic.AutoReplayMaxCount,
+			BatchSize: cfg.Semantic.AutoReplayBatchSize,
+		}
+		reconciler := watcher.NewReconciler(queue, time.Duration(cfg.Semantic.ReconcileIntervalSec)*time.Second).
+			WithAutoReplay(autoReplay)
 		go reconciler.Run(reconcileCtx)
 	}
 

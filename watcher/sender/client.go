@@ -26,13 +26,22 @@ func defaultRetryBackoff(attempt int) time.Duration {
 }
 
 // NewClient creates a sender with retry logic.
+//
+// We clone http.DefaultTransport rather than building a fresh struct so we
+// inherit Proxy=ProxyFromEnvironment (HTTP_PROXY/HTTPS_PROXY/NO_PROXY) and
+// future-proof field defaults; only the idle-connection knobs are overridden.
 func NewClient(baseURL, token, machineID string) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 10
+	transport.IdleConnTimeout = 90 * time.Second
 	return &Client{
 		BaseURL:   baseURL,
 		AuthToken: token,
 		MachineID: machineID,
 		HTTP: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 		},
 		RetryBackoff: defaultRetryBackoff,
 	}

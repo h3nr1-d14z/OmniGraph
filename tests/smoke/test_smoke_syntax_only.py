@@ -6,7 +6,7 @@ import time
 import httpx
 import pytest
 
-HUB_URL = "http://localhost:9000"
+HUB_URL = os.getenv("HUB_URL", "http://localhost:9000")
 TOKEN = os.getenv("HUB_AUTH_TOKEN", "changeme")
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 

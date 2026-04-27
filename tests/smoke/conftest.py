@@ -1,9 +1,12 @@
+import os
 import time
 
 import httpx
 import pytest
 
-HUB_URL = "http://localhost:9000"
+# Honour the HUB_URL env so distributed CI / non-default hubs can run
+# smoke tests without code edits. Mirrors tests/conftest.py:require_stack.
+HUB_URL = os.getenv("HUB_URL", "http://localhost:9000")
 
 
 def poll_stats(predicate, timeout=10.0, interval=0.5, headers=None):

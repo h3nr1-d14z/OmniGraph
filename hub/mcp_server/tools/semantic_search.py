@@ -17,6 +17,7 @@ from models.schema import SemanticSearchInput, SemanticSearchResult
 EMBED_URL = os.getenv("EMBED_SERVICE_URL", "http://localhost:8000")
 EMBED_MODE = "query"
 HYBRID_LIMIT = 10
+SNIPPET_MAX_CHARS = int(os.getenv("MCP_SNIPPET_MAX_CHARS", "250"))
 # RRF constant: smaller k = sharper rank-1 dominance. k=20 calibrated for
 # short prefetch lists (HYBRID_LIMIT=10). k=60 (Cormack default) is too
 # flat for n=10 — top vs bottom RRF spread <14%.
@@ -108,7 +109,7 @@ def _merge_results(
             entry["best_semantic_rank"] = rank
             snippet = payload.get("snippet", "") or ""
             if snippet:
-                entry["snippet"] = snippet[:500]
+                entry["snippet"] = snippet[:SNIPPET_MAX_CHARS]
         entity = payload.get("entity", "")
         if entity:
             entry["entities"].add(entity)
@@ -136,7 +137,7 @@ def _merge_results(
         if not entry["snippet"]:
             snippet = str(lexical.get("snippet", "")) or ""
             if snippet:
-                entry["snippet"] = snippet[:500]
+                entry["snippet"] = snippet[:SNIPPET_MAX_CHARS]
 
     out = [
         SemanticSearchResult(

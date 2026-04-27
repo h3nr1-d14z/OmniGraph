@@ -78,6 +78,25 @@ func writeMainTestFile(t *testing.T, path, content string) {
 	}
 }
 
+func TestDefaultInitConfigSeedsNonZeroAutoReplayKnobs(t *testing.T) {
+	// `watcher init` must write non-zero values for every auto-replay
+	// knob. If any field gets serialized as 0, hasYAMLPath() will treat
+	// it as explicit-zero on next Load and silently disable auto-replay.
+	cfg := defaultInitConfig()
+	if cfg.Semantic.AutoReplayMinAgeSec == 0 {
+		t.Errorf("AutoReplayMinAgeSec must be non-zero in init config")
+	}
+	if cfg.Semantic.AutoReplayMaxCount == 0 {
+		t.Errorf("AutoReplayMaxCount must be non-zero in init config")
+	}
+	if cfg.Semantic.AutoReplayBatchSize == 0 {
+		t.Errorf("AutoReplayBatchSize must be non-zero in init config")
+	}
+	if !cfg.Semantic.AutoReplayEnabled {
+		t.Errorf("AutoReplayEnabled should default to true in init config")
+	}
+}
+
 func assertMainRelation(t *testing.T, relations []models.Relation, relationType, source, target, targetRef string) {
 	t.Helper()
 	for _, rel := range relations {
