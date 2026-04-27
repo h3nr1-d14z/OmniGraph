@@ -10,7 +10,7 @@ Usage:
     .venv/bin/python scripts/reindex.py --collection code_v2_jina --dry-run
     .venv/bin/python scripts/reindex.py --quiesce-timeout 30 --collection code_v2_jina
 
-The cutover protocol (see docs/reindex.md) wraps this script with watcher
+The cutover protocol (see docs/runbooks/reindex.md) wraps this script with watcher
 quiesce + Hub healthcheck poll + collection switch.
 """
 

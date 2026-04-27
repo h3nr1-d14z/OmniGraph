@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "hub"))
 sys.path.insert(0, str(REPO / "hub" / "mcp_server"))
 
-from api_server.main import _normalize_path, _fetch_watcher_queue_stats  # noqa: E402
+from api_server.main import _fetch_watcher_queue_stats, _normalize_path  # noqa: E402
 
 
 def test_normalize_path_returns_nfc_for_decomposed_input():
@@ -92,7 +92,7 @@ def test_no_production_print_calls_in_hub():
                     continue
                 if pattern.search(line):
                     offenders.append(f"{path}:{n}: {line.strip()}")
-    assert not offenders, f"production print() calls remain:\n" + "\n".join(offenders)
+    assert not offenders, "production print() calls remain:\n" + "\n".join(offenders)
 
 
 def test_logging_config_module_exists():
@@ -104,10 +104,11 @@ def test_logging_config_module_exists():
 
 
 def test_flake8_config_blocks_print_in_hub():
-    cfg = REPO / ".flake8"
-    assert cfg.exists()
+    # .flake8 was removed in Phase D; T20 (flake8-print) is now enforced via ruff in pyproject.toml.
+    cfg = REPO / "pyproject.toml"
+    assert cfg.exists(), "pyproject.toml missing"
     text = cfg.read_text()
-    assert "T20" in text, "flake8-print rule (T20) not configured"
+    assert "T20" in text, "flake8-print rule (T20) not configured in pyproject.toml ruff config"
 
 
 def test_watcher_queue_stats_env_constants_exist():

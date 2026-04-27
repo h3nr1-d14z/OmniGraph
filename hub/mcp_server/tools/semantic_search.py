@@ -12,7 +12,6 @@ import hashlib
 import os
 
 import httpx
-
 from models.schema import SemanticSearchInput, SemanticSearchResult
 
 EMBED_URL = os.getenv("EMBED_SERVICE_URL", "http://localhost:8000")

@@ -53,9 +53,9 @@ def embed_text(texts: list[str]) -> list[list[float]]:
 
 
 def cleanup_seed_data():
-    from db.qdrant_client import QdrantCodeStore
-    from db.memgraph_client import MemgraphCodeGraph
     from db.content_store import ContentStore
+    from db.memgraph_client import MemgraphCodeGraph
+    from db.qdrant_client import QdrantCodeStore
 
     qdrant = QdrantCodeStore()
     memgraph = MemgraphCodeGraph()
@@ -113,9 +113,9 @@ def seed_project_a():
 
     # Send via Hub API batch endpoint (if available) or direct DB insert
     # For integration test we insert directly into Qdrant + Memgraph to avoid needing Hub API server running
-    from db.qdrant_client import QdrantCodeStore
-    from db.memgraph_client import MemgraphCodeGraph
     from db.content_store import ContentStore
+    from db.memgraph_client import MemgraphCodeGraph
+    from db.qdrant_client import QdrantCodeStore
 
     qdrant = QdrantCodeStore()
     memgraph = MemgraphCodeGraph()
@@ -227,9 +227,9 @@ def seed_project_b():
         ("src/api.ts", open(os.path.join(FIXTURES, project, "src/api.ts")).read()),
     ]
 
-    from db.qdrant_client import QdrantCodeStore
-    from db.memgraph_client import MemgraphCodeGraph
     from db.content_store import ContentStore
+    from db.memgraph_client import MemgraphCodeGraph
+    from db.qdrant_client import QdrantCodeStore
 
     qdrant = QdrantCodeStore()
     memgraph = MemgraphCodeGraph()
@@ -441,9 +441,9 @@ def test_cross_project():
 def test_tombstone():
     ensure_seeded()
     print("[test] tombstone deletion...")
-    from db.qdrant_client import QdrantCodeStore
-    from db.memgraph_client import MemgraphCodeGraph
     from db.content_store import ContentStore
+    from db.memgraph_client import MemgraphCodeGraph
+    from db.qdrant_client import QdrantCodeStore
     from models.schema import SemanticSearchInput
     from tools.semantic_search import semantic_search_code
 

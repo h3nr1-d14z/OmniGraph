@@ -1,6 +1,6 @@
 """Database clients for OmniGraph Hub."""
 
-from .qdrant_client import QdrantCodeStore
 from .memgraph_client import MemgraphCodeGraph
+from .qdrant_client import QdrantCodeStore
 
 __all__ = ["QdrantCodeStore", "MemgraphCodeGraph"]

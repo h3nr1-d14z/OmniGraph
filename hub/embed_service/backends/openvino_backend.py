@@ -19,9 +19,10 @@ class OpenVinoBackend(OnnxBackend):
         except Exception:
             providers = ["CPUExecutionProvider"]
 
-        from pathlib import Path
-        from huggingface_hub import snapshot_download
         import os
+        from pathlib import Path
+
+        from huggingface_hub import snapshot_download
 
         DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
         ONNX_FILE = "onnx/model.onnx"

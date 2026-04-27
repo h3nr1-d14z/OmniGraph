@@ -7,7 +7,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "hub" / "mcp_server"))
 
-from tools.semantic_search import _merge_results, _rrf_score, RRF_K  # noqa: E402
+from tools.semantic_search import RRF_K, _merge_results, _rrf_score  # noqa: E402
 
 
 def _semantic_hit(machine_id, project, file_path, entity, chunk_id, score, snippet=""):

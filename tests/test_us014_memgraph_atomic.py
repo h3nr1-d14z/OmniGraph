@@ -28,10 +28,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hub", "mcp_server"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hub"))
 
-from db.memgraph_client import MemgraphCodeGraph
-
 # Suppress neo4j warnings about deprecated APIs in tests.
 import warnings
+
+from db.memgraph_client import MemgraphCodeGraph
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 

@@ -19,8 +19,8 @@ from models.schema import (
     ReadFileInput,
     SemanticSearchInput,
 )
-from tools.read_file import read_full_file
 from tools.project_tree import get_project_tree
+from tools.read_file import read_full_file
 
 
 def test_read_full_file_local():

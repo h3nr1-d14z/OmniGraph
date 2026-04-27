@@ -1,0 +1,41 @@
+{
+  "properties": {
+    "file_path": {
+      "title": "File Path",
+      "type": "string"
+    },
+    "machine_id": {
+      "title": "Machine Id",
+      "type": "string"
+    },
+    "matched_entities": {
+      "description": "All symbol names contributing to RRF score for this file",
+      "items": {
+        "type": "string"
+      },
+      "title": "Matched Entities",
+      "type": "array"
+    },
+    "project": {
+      "title": "Project",
+      "type": "string"
+    },
+    "score": {
+      "title": "Score",
+      "type": "number"
+    },
+    "snippet": {
+      "title": "Snippet",
+      "type": "string"
+    }
+  },
+  "required": [
+    "file_path",
+    "machine_id",
+    "project",
+    "snippet",
+    "score"
+  ],
+  "title": "SemanticSearchResult",
+  "type": "object"
+}

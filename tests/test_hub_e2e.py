@@ -10,13 +10,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hub"))
 
 import httpx
 import pytest
-from fastapi import HTTPException
-from starlette.requests import Request
-from api_server.main import _build_embedding_chunks, _collect_stats, _handle_delete, _handle_upserts, _slice_symbol_chunk, _verify_auth
+from api_server.main import (
+    _build_embedding_chunks,
+    _collect_stats,
+    _handle_delete,
+    _handle_upserts,
+    _slice_symbol_chunk,
+    _verify_auth,
+)
 from db.content_store import ContentStore
-from db.qdrant_client import QdrantCodeStore
 from db.memgraph_client import MemgraphCodeGraph
+from db.qdrant_client import QdrantCodeStore
+from fastapi import HTTPException
 from models.event import Entity, FileEvent
+from starlette.requests import Request
 
 EMBED_URL = os.getenv("EMBED_SERVICE_URL", "http://localhost:8000")
 
@@ -233,6 +240,7 @@ def test_handle_upserts_passes_graph_relations():
     )
 
     import asyncio
+
     import pytest as _pytest
     from fastapi import HTTPException as _HTTPException
     # US-004: embed failure now raises 502 (was silently swallowed). Graph +

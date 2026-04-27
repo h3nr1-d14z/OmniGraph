@@ -104,7 +104,7 @@ Validated against:
 - **Cache stale after manual Qdrant ops:** if an operator drops a Qdrant
   point out-of-band, the cache still records the hash and refuses to
   re-embed until the watcher emits a new content_hash. Mitigation: the
-  reindex runbook (`docs/reindex.md`) clears `content_hash` as part of
+  reindex runbook (`docs/runbooks/reindex.md`) clears `content_hash` as part of
   the cutover.
 - **Hub crash mid-batch:** cache update happens AFTER successful
   `qdrant.upsert`, but `content.update_content_hash` is a separate

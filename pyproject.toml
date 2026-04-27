@@ -1,0 +1,34 @@
+[tool.ruff.lint]
+# T20 = flake8-print (no print() in production); E/F = pycodestyle/pyflakes;
+# I = isort; UP = pyupgrade; B = bugbear; SIM = simplify.
+select = ["E", "F", "T20", "I", "UP", "B", "SIM"]
+# Pre-existing violations to keep CI green during incremental migration.
+# Drop progressively as code is cleaned.
+ignore = [
+    "E501",  # line too long
+    "E402",  # module-level import not at top
+    "E203",  # whitespace before colon
+    "F401",  # imported but unused (re-exports)
+    "F841",  # local var assigned but unused
+    "B008",  # do not perform function call in argument defaults (FastAPI Depends)
+    "UP007", # use X | Y for Optional (style preference)
+    "SIM117", # combine nested with statements (readability)
+    "SIM105", # contextlib.suppress (legacy code; revisit incrementally)
+    "SIM115", # open() without context manager (legacy test fixtures)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# CLI tools may legitimately use print() to operator stdout.
+"scripts/*.py" = ["T20"]
+"scripts/**/*.py" = ["T20"]
+# Tests may use print() for debugging during development.
+"tests/**/*.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+markers = [
+    "smoke: live-stack smoke test; skipped by default, opt-in with --smoke",
+]

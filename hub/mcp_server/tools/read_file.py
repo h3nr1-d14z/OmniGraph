@@ -18,7 +18,7 @@ def read_full_file(input_data: ReadFileInput) -> str:
 
     if os.path.exists(input_data.file_path):
         try:
-            with open(input_data.file_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(input_data.file_path, encoding="utf-8", errors="replace") as f:
                 return f.read()
         except Exception as exc:
             return f"[error reading local file: {exc}]"

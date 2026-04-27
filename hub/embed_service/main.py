@@ -5,10 +5,9 @@ import threading
 from contextlib import asynccontextmanager
 
 import numpy as np
+from backends import get_backend
 from fastapi import FastAPI
 from pydantic import BaseModel
-
-from backends import get_backend
 
 # Lazy-load backend on first request to avoid slow startup
 _backend = None

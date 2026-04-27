@@ -26,8 +26,8 @@ class MlxBackend(BaseBackend):
     def _load(self) -> None:
         try:
             import mlx.core as mx
-            from transformers import AutoTokenizer
             from huggingface_hub import snapshot_download
+            from transformers import AutoTokenizer
         except ImportError as exc:
             raise ImportError(
                 "mlx or transformers not installed. "
