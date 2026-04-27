@@ -10,10 +10,17 @@ collections, or chunking produces a new named file:
 
 | File | Captured against | Used as comparison reference for |
 |---|---|---|
-| `code_v1_nomic.json` | `code_v1_nomic` (nomic-embed-text-v1.5) | Phase 4 cutover gate |
+| `omnigraph_code.json` | `omnigraph_code` (nomic-embed-text-v1.5; legacy collection name) | Phase 4 cutover gate when Hub still uses the legacy collection |
+| `code_v1_nomic.json` | `code_v1_nomic` (nomic-embed-text-v1.5; canonical name) | Phase 4 cutover gate after rename migration |
 | `code_v2_jina.json` | `code_v2_jina` (jina-embeddings-v2-base-code) | Phase C.1 gate |
 | `code_v3_jina_symbol.json` | `code_v3_jina_symbol` (jina + symbol chunking) | Phase C.2 gate |
 | `code_v4a_jina_symbol_ctx_go.json` | jina + Go ParentEntity context | Phase C.2 final gate |
+
+`omnigraph_code` and `code_v1_nomic` capture the same nomic embeddings.
+The split exists because `docker-compose.yml` defaulted to `omnigraph_code`
+before the Plan v4 rename; deployments that never migrated continue to
+write into `omnigraph_code`. Use whichever file matches the live Hub's
+`/stats.qdrant.collection` value as the cutover comparison reference.
 
 Once committed, a baseline is the immutable comparison target for the *next*
 phase. Do not regenerate or update in place — produce a new file.

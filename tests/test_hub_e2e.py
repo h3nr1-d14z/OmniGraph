@@ -350,6 +350,11 @@ def test_handle_upserts_semantic_only_event_preserves_existing_state():
 
 
 def test_handle_delete_cleans_rename_paths():
+    """Phase 5C.4 made _handle_delete async (sync DB calls dispatched to
+    threadpool). The test stays sync via asyncio.run so the assertion
+    surface is unchanged."""
+    import asyncio
+
     qdrant = _FakeQdrant()
     memgraph = _FakeMemgraph()
     content = _FakeContent()
@@ -362,7 +367,9 @@ def test_handle_delete_cleans_rename_paths():
         timestamp=1,
     )
 
-    _handle_delete(ev, qdrant, memgraph, content, "fallback-machine", "fallback-project")
+    asyncio.run(
+        _handle_delete(ev, qdrant, memgraph, content, "fallback-machine", "fallback-project")
+    )
 
     assert qdrant.deleted == [("/src/new.go", "m1"), ("/src/old.go", "m1")]
     assert memgraph.deleted == [("/src/new.go", "m1"), ("/src/old.go", "m1")]

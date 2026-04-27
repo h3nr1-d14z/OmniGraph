@@ -1,0 +1,322 @@
+{
+  "queries_file": "eval/queries.json",
+  "collection": "omnigraph_code",
+  "machine_id_filter": "test-machine-01",
+  "top_k": 10,
+  "exact": true,
+  "captured_at": 1777300607,
+  "results": {
+    "Q01": [
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.6936197,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.6496222,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.6009674,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.5215335,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      }
+    ],
+    "Q02": [
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.7392201,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.5208378,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.50876665,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.49876806,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      }
+    ],
+    "Q03": [
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.7044432,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.64395213,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.6196172,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.5762727,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      }
+    ],
+    "Q04": [
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.6314248,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.5961276,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.5444606,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.50892794,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      }
+    ],
+    "nl-semantic-01": [
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.73803127,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.56175727,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.5555483,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.54320556,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      }
+    ],
+    "nl-semantic-02": [
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.6062248,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.60265696,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.5915135,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.5524252,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      }
+    ],
+    "nl-semantic-03": [
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.6593219,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.63399816,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.61164427,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.57260144,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      }
+    ],
+    "nl-semantic-04": [
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.5419611,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.5399033,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.5351557,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.516518,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      }
+    ],
+    "dep-graph-01": [
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.58236617,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.523011,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.5222027,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.506934,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      }
+    ],
+    "dep-graph-02": [
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.6417864,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.5586694,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.5542972,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.5411328,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      }
+    ],
+    "dep-graph-03": [
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.7116718,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.68292546,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.6493391,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.57963884,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      }
+    ],
+    "dep-graph-04": [
+      {
+        "id": "07e40789-ebbc-5904-82e4-d6c4d43ad9c4",
+        "score": 0.655731,
+        "file_path": "/tests/fixtures/project_b/src/types.ts",
+        "entity": ""
+      },
+      {
+        "id": "6a5340fc-6c9b-56f3-bc7a-0f6677adcdef",
+        "score": 0.62332755,
+        "file_path": "/tests/fixtures/project_a/src/repo.go",
+        "entity": ""
+      },
+      {
+        "id": "6246bdcc-77b3-5867-80c6-471fc5413857",
+        "score": 0.59888285,
+        "file_path": "/tests/fixtures/project_a/src/handler.go",
+        "entity": ""
+      },
+      {
+        "id": "04902d24-7b84-5717-859e-dc5e0ee802b0",
+        "score": 0.585358,
+        "file_path": "/tests/fixtures/project_a/src/model.go",
+        "entity": ""
+      }
+    ]
+  }
+}

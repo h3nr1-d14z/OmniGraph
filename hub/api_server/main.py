@@ -1,5 +1,6 @@
 """Hub API Server — receives batches from Watchers and indexes into Qdrant + Memgraph."""
 
+import asyncio
 import os
 import sys
 import time
@@ -123,7 +124,7 @@ async def receive_batch(batch: BatchIn, request: Request):
     upserts = [ev for ev in events if ev.type not in ("DELETE", "RENAME")]
 
     for ev in deletes:
-        _handle_delete(ev, qdrant, memgraph, content, batch.machine_id, batch.project)
+        await _handle_delete(ev, qdrant, memgraph, content, batch.machine_id, batch.project)
         request.app.state.content_hashes.pop((ev.machine_id or batch.machine_id, ev.path), None)
         if ev.old_path and ev.old_path != ev.path:
             request.app.state.content_hashes.pop((ev.machine_id or batch.machine_id, ev.old_path), None)
@@ -318,7 +319,12 @@ async def _handle_upserts(
         if ev.content and len(ev.content) < 100_000:
             chunks.extend(_build_embedding_chunks(ev, machine_id, project))
 
-    content.upsert_files(files, content_hashes=file_hashes)
+    # Phase 5C.4: hub uses sync sqlite3 / neo4j / qdrant clients in an async
+    # endpoint. Each blocking call is dispatched to the default thread-pool
+    # executor so the event loop stays free to accept the next watcher batch.
+    # The DB calls within a single request still run sequentially (the graph
+    # commit must precede qdrant delete to keep the consistency contract).
+    await asyncio.to_thread(content.upsert_files, files, content_hashes=file_hashes)
     # US-014: replace each content-bearing file's graph state inside one atomic
     # transaction so delete + entity upsert + relation upsert can't tear (e.g.
     # delete commits then entity upsert raises). Group entities/relations by
@@ -335,7 +341,8 @@ async def _handle_upserts(
         if file_path in embed_skipped:
             continue
         bucket = by_path.get(file_path, {"entities": [], "relations": []})
-        memgraph.atomic_replace_file(
+        await asyncio.to_thread(
+            memgraph.atomic_replace_file,
             file_path,
             machine_id,
             bucket["entities"],
@@ -343,7 +350,7 @@ async def _handle_upserts(
         )
         # qdrant runs after the graph commit so a Qdrant failure leaves the
         # graph consistent. delete_by_file is idempotent — safe to retry.
-        qdrant.delete_by_file(file_path, machine_id)
+        await asyncio.to_thread(qdrant.delete_by_file, file_path, machine_id)
     # Semantic-only events (no ev.content, hence not in `files`) carry only
     # relations meant to merge onto the existing graph state. The legacy
     # delete-then-upsert path skipped delete for these; we preserve that
@@ -353,9 +360,9 @@ async def _handle_upserts(
         rel for rel in relations if rel["file_path"] not in content_paths
     ]
     if semantic_only_relations:
-        memgraph.upsert_relations(semantic_only_relations)
+        await asyncio.to_thread(memgraph.upsert_relations, semantic_only_relations)
     if files:
-        content.refresh_project_tree(machine_id, project)
+        await asyncio.to_thread(content.refresh_project_tree, machine_id, project)
 
     if embed_skipped:
         logger.debug("content_hash_short_circuit", skipped=len(embed_skipped))
@@ -392,7 +399,7 @@ async def _handle_upserts(
             }
             for chunk in chunks
         ]
-        qdrant.upsert(vectors=all_vectors, payloads=payloads)
+        await asyncio.to_thread(qdrant.upsert, vectors=all_vectors, payloads=payloads)
     except HTTPException:
         raise
     except Exception as exc:
@@ -410,10 +417,10 @@ async def _handle_upserts(
     # batches short-circuit. Only runs on the success path (after qdrant.upsert).
     for ev_machine, ev_path, ev_hash in pending_hash_writes:
         cache[(ev_machine, ev_path)] = ev_hash
-        content.update_content_hash(ev_machine, ev_path, ev_hash)
+        await asyncio.to_thread(content.update_content_hash, ev_machine, ev_path, ev_hash)
 
 
-def _handle_delete(
+async def _handle_delete(
     ev: FileEvent,
     qdrant: QdrantCodeStore,
     memgraph: MemgraphCodeGraph,
@@ -427,10 +434,10 @@ def _handle_delete(
     if ev.old_path and ev.old_path != ev.path:
         paths.append(ev.old_path)
     for path in paths:
-        qdrant.delete_by_file(path, machine_id)
-        memgraph.delete_file(path, machine_id)
-        content.delete_file(machine_id, path)
-    content.refresh_project_tree(machine_id, project)
+        await asyncio.to_thread(qdrant.delete_by_file, path, machine_id)
+        await asyncio.to_thread(memgraph.delete_file, path, machine_id)
+        await asyncio.to_thread(content.delete_file, machine_id, path)
+    await asyncio.to_thread(content.refresh_project_tree, machine_id, project)
 
 
 def _collect_stats(
@@ -497,6 +504,37 @@ async def stats(request: Request, machine_id: str | None = None, project: str | 
     response["watcher_queue"] = await _fetch_watcher_queue_stats(request.app.state.http)
     response["latency"] = LATENCY.snapshot()
     return response
+
+
+class SearchIn(BaseModel):
+    query: str
+    project_scope: str | None = None
+    machine_id: str | None = None
+
+
+@app.post("/search")
+async def search(body: SearchIn, request: Request):
+    """HTTP-side mirror of the MCP ``semantic_search_code`` tool.
+
+    Exists so non-MCP clients (CI eval gates, ad-hoc curl debugging, future
+    services) can hit the same hybrid-RRF + token-overlap-boost ranker
+    without going through stdio. The MCP tool keeps using the in-process
+    function directly; this endpoint is a thin wrapper for parity."""
+    _verify_auth(request)
+    # Imported locally because mcp_server's path is appended via sys.path
+    # at module top; the import runs in lifespan-tested code already.
+    from models.schema import SemanticSearchInput
+    from tools.semantic_search import semantic_search_code
+
+    inp = SemanticSearchInput(
+        query=body.query,
+        project_scope=body.project_scope,
+        machine_id=body.machine_id,
+    )
+    # semantic_search_code is sync (blocking httpx call to /embed); dispatch
+    # to a worker thread to keep the FastAPI event loop free.
+    results = await asyncio.to_thread(semantic_search_code, inp)
+    return {"results": [r.model_dump() for r in results]}
 
 
 @app.get("/health")
