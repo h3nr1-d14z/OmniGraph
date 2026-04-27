@@ -24,14 +24,13 @@ class ContentStore:
     """Store and retrieve file contents indexed by (machine_id, file_path)."""
 
     def __init__(self, db_path: str | None = None):
+        resolved: str | Path
         if db_path is None:
             env_path = os.getenv("CONTENT_DB_PATH")
-            if env_path:
-                db_path = Path(env_path)
-            else:
-                home = Path.home()
-                db_path = home / ".config" / "omnigraph" / "hub-content.db"
-        self.db_path = str(db_path)
+            resolved = Path(env_path) if env_path else Path.home() / ".config" / "omnigraph" / "hub-content.db"
+        else:
+            resolved = db_path
+        self.db_path = str(resolved)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         # Persistent connection for the lifetime of the instance
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)

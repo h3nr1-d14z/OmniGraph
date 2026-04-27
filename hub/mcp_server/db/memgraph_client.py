@@ -96,14 +96,13 @@ class MemgraphCodeGraph:
         user: str | None = None,
         password: str | None = None,
     ):
-        self.uri = uri or os.getenv(
-            "MEMGRAPH_URI", "bolt://localhost:7687"
-        )
-        self.user = user or os.getenv("MEMGRAPH_USER", "")
-        self.password = password or os.getenv("MEMGRAPH_PASSWORD", "")
-        self._driver = neo4j.GraphDatabase.driver(
-            self.uri, auth=(self.user, self.password) if self.user else None
-        )
+        self.uri: str = uri if uri else os.getenv("MEMGRAPH_URI", "bolt://localhost:7687")
+        self.user: str = user if user else os.getenv("MEMGRAPH_USER", "")
+        self.password: str = password if password else os.getenv("MEMGRAPH_PASSWORD", "")
+        # neo4j.driver wants Tuple[str, str] for auth; only provide it when
+        # both halves are present so anonymous bolt connections still work.
+        auth: tuple[str, str] | None = (self.user, self.password) if self.user else None
+        self._driver = neo4j.GraphDatabase.driver(self.uri, auth=auth)
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -509,7 +508,7 @@ class MemgraphCodeGraph:
 
         direction: upstream (who calls me), downstream (who I call), both.
         """
-        results = {"nodes": [], "edges": []}
+        results: dict[str, list[dict[str, Any]]] = {"nodes": [], "edges": []}
         params: dict[str, Any] = {"name": entity_name}
         if machine_id:
             params["machine_id"] = machine_id
@@ -643,8 +642,12 @@ class MemgraphCodeGraph:
         edge_query += " RETURN count(r) AS count"
 
         with self._driver.session() as session:
-            entities = session.run(entity_query, **params).single()["count"]
-            edges = session.run(edge_query, **params).single()["count"]
+            entity_record = session.run(entity_query, **params).single()
+            edge_record = session.run(edge_query, **params).single()
+            # Single() returns None for empty result-sets; Cypher COUNT(*)
+            # always yields a row so the None branch is defensive.
+            entities = entity_record["count"] if entity_record is not None else 0
+            edges = edge_record["count"] if edge_record is not None else 0
 
         return {
             "entities": entities,

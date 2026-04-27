@@ -24,9 +24,7 @@ class JinaCodeBackend(BaseBackend):
     """Code-specialized backend using Jina v2 base code model."""
 
     def __init__(self, model_name: str | None = None):
-        self.model_name = model_name or os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
-        self._tokenizer = None
-        self._session = None
+        self.model_name: str = model_name if model_name else os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
         self._dim = 768
         self._load()
 
@@ -35,14 +33,12 @@ class JinaCodeBackend(BaseBackend):
         from huggingface_hub import snapshot_download
         from tokenizers import Tokenizer
 
-        cache_dir = os.getenv("MODEL_CACHE")
-        kwargs = {"cache_dir": cache_dir} if cache_dir else {}
         # FP32 only (~614 MB) — INT8 quantization risks entangling quality drift
         # with the Phase 4 cutover regression gate; revisit after gate passes.
         local_dir = snapshot_download(
             repo_id=self.model_name,
             allow_patterns=["onnx/model.onnx", "tokenizer.json", "config.json"],
-            **kwargs,
+            cache_dir=os.getenv("MODEL_CACHE"),
         )
 
         onnx_path = Path(local_dir) / "onnx" / "model.onnx"

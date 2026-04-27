@@ -32,3 +32,17 @@ indent-style = "space"
 markers = [
     "smoke: live-stack smoke test; skipped by default, opt-in with --smoke",
 ]
+
+[tool.mypy]
+# Phase 5C.3: incremental type-check rollout for hub/. Permissive on day 1
+# so CI can baseline the existing error count; tighten flags as modules
+# are cleaned up.
+python_version = "3.12"
+files = ["hub"]
+namespace_packages = true
+explicit_package_bases = true
+ignore_missing_imports = true
+no_implicit_optional = false
+check_untyped_defs = false
+warn_unused_ignores = false
+warn_return_any = false

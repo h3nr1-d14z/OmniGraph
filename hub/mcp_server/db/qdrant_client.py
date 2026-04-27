@@ -45,9 +45,24 @@ class QdrantCodeStore:
         # Collection-per-model isolation. Default aligns with .env.example
         # (`code_v1_nomic`) so deployments without an explicit env override
         # still hit the legacy collection during/after the embedder cutover.
-        self.collection = collection or os.getenv("QDRANT_COLLECTION", "code_v1_nomic")
+        # Annotation kept explicit so mypy narrows the str | None param
+        # against the str-typed env default.
+        self.collection: str = collection if collection else os.getenv("QDRANT_COLLECTION", "code_v1_nomic")
         self.vector_dim = vector_dim
         self._ensure_collection()
+
+    # Payload indexes the collection MUST have for fast filtering. Each is
+    # added on collection bootstrap AND on every Hub start so existing
+    # collections get new indexes (e.g. `entity` for symbol-level lookups
+    # in Phase 5D) without a re-index. Schema uses qdrant's enum so mypy
+    # can validate against the typed signature.
+    from qdrant_client.http.models import PayloadSchemaType as _PSchema
+    _PAYLOAD_INDEXES = (
+        ("project", _PSchema.KEYWORD),
+        ("file_path", _PSchema.KEYWORD),
+        ("machine_id", _PSchema.KEYWORD),
+        ("entity", _PSchema.KEYWORD),
+    )
 
     def _ensure_collection(self) -> None:
         if not self.client.collection_exists(self.collection):
@@ -59,22 +74,24 @@ class QdrantCodeStore:
                     on_disk=os.getenv("QDRANT_ON_DISK", "true").lower() == "true",
                 ),
             )
-            # Payload indexes for fast filtering
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="project",
-                field_schema="keyword",
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="file_path",
-                field_schema="keyword",
-            )
-            self.client.create_payload_index(
-                collection_name=self.collection,
-                field_name="machine_id",
-                field_schema="keyword",
-            )
+        self._ensure_payload_indexes()
+
+    def _ensure_payload_indexes(self) -> None:
+        """Idempotent: Qdrant's create_payload_index returns OK when the
+        index already exists at the requested schema. Failures are logged
+        but never raised — startup should not block on index churn."""
+        import logging
+        log = logging.getLogger(__name__)
+        for field_name, schema in self._PAYLOAD_INDEXES:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection,
+                    field_name=field_name,
+                    field_schema=schema,
+                )
+            except Exception as exc:
+                log.warning("qdrant_payload_index_skip field=%s schema=%s err=%s",
+                            field_name, schema, exc)
 
     def upsert(
         self,

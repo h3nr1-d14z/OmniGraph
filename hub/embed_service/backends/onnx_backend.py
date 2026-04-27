@@ -20,12 +20,11 @@ class OnnxBackend(BaseBackend):
     """ONNX Runtime backend for Nomic Embed models."""
 
     def __init__(self, model_name: str | None = None, model_path: str | None = None):
-        self.model_name = model_name or os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
+        self.model_name: str = model_name if model_name else os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
         self.model_path = model_path
-        self._session = None
-        self._tokenizer = None
         self._dim = 768
-
+        # _session and _tokenizer are populated by _load() before __init__
+        # returns; defer assignment so mypy infers concrete types.
         self._load()
 
     def _load(self) -> None:
@@ -34,16 +33,16 @@ class OnnxBackend(BaseBackend):
         providers = ort.get_available_providers()
         logger.debug("onnx_providers_available", providers=providers)
 
+        onnx_path: Path
+        tok_path: Path
         if self.model_path and Path(self.model_path).exists():
-            onnx_path = self.model_path
-            tok_path = Path(self.model_path).parent / "tokenizer.json"
+            onnx_path = Path(self.model_path)
+            tok_path = onnx_path.parent / "tokenizer.json"
         else:
-            cache_dir = os.getenv("MODEL_CACHE")
-            kwargs = {"cache_dir": cache_dir} if cache_dir else {}
             local_dir = snapshot_download(
                 repo_id=self.model_name,
                 allow_patterns=["onnx/*", "tokenizer.json"],
-                **kwargs,
+                cache_dir=os.getenv("MODEL_CACHE"),
             )
             onnx_path = Path(local_dir) / ONNX_FILE
             tok_path = Path(local_dir) / "tokenizer.json"

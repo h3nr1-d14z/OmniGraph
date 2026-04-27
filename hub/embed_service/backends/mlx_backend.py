@@ -16,16 +16,13 @@ class MlxBackend(BaseBackend):
     """MLX backend using HuggingFace transformers via mlx-lm."""
 
     def __init__(self, model_name: str | None = None):
-        self.model_name = model_name or os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
-        self._model = None
-        self._tokenizer = None
+        self.model_name: str = model_name if model_name else os.getenv("EMBED_MODEL_NAME", DEFAULT_MODEL)
         self._dim = 768
-
         self._load()
 
     def _load(self) -> None:
         try:
-            import mlx.core as mx
+            import mlx.core as mx  # noqa: F401  (probe import; real use in embed())
             from huggingface_hub import snapshot_download
             from transformers import AutoTokenizer
         except ImportError as exc:
@@ -34,11 +31,9 @@ class MlxBackend(BaseBackend):
                 "Run: pip install mlx mlx-lm transformers"
             ) from exc
 
-        cache_dir = os.getenv("MODEL_CACHE")
-        kwargs = {"cache_dir": cache_dir} if cache_dir else {}
         local_dir = snapshot_download(
             repo_id=self.model_name,
-            **kwargs,
+            cache_dir=os.getenv("MODEL_CACHE"),
         )
         self._tokenizer = AutoTokenizer.from_pretrained(local_dir)
         # For MLX we use the model weights directly via mlx-lm if available,

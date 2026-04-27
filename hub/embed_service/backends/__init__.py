@@ -14,7 +14,8 @@ _BACKEND_CACHE: dict[str, BaseBackend] = {}
 
 def get_backend(backend_name: str | None = None) -> BaseBackend:
     """Factory: return a cached backend instance (model loaded once per process)."""
-    name = (backend_name or os.getenv("EMBED_BACKEND", "auto")).lower()
+    raw_name: str = backend_name if backend_name else os.getenv("EMBED_BACKEND", "auto")
+    name = raw_name.lower()
 
     if name in _BACKEND_CACHE:
         return _BACKEND_CACHE[name]

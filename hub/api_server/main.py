@@ -461,7 +461,9 @@ def _collect_stats(
         except Exception as exc:
             logger.error("stats_backend_failed", backend=name, exc=str(exc))
             response["status"] = "degraded"
-            response["errors"][name] = "unavailable"
+            errors_map = response["errors"]
+            assert isinstance(errors_map, dict), "errors slot is always seeded as dict"
+            errors_map[name] = "unavailable"
 
     return response
 

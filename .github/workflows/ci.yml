@@ -43,6 +43,9 @@ jobs:
         env:
           PRE_COMMIT_HOME: ~/.cache/pre-commit
 
+      - name: mypy (hub/)
+        run: mypy hub
+
       - name: Unit tests (smoke skipped by default)
         run: pytest tests/ -q
 

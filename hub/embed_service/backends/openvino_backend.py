@@ -27,12 +27,10 @@ class OpenVinoBackend(OnnxBackend):
         DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
         ONNX_FILE = "onnx/model.onnx"
 
-        cache_dir = os.getenv("MODEL_CACHE")
-        kwargs = {"cache_dir": cache_dir} if cache_dir else {}
         local_dir = snapshot_download(
             repo_id=self.model_name,
             allow_patterns=["onnx/*", "tokenizer.json"],
-            **kwargs,
+            cache_dir=os.getenv("MODEL_CACHE"),
         )
         onnx_path = Path(local_dir) / ONNX_FILE
         tok_path = Path(local_dir) / "tokenizer.json"
