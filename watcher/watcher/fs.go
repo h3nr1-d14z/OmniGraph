@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -149,7 +150,7 @@ func (dw *DebouncedWatcher) Start() error {
 			return err
 		}
 		projects := dw.resolver.List()
-		fmt.Fprintf(os.Stderr, "[watch] discovered %d projects: %v\n", len(projects), projects)
+		slog.Info("projects_discovered", "count", len(projects), "projects", projects)
 	}
 
 	if dw.semantic != nil {
@@ -221,7 +222,7 @@ func (dw *DebouncedWatcher) processLoop() {
 			if !ok {
 				return
 			}
-			fmt.Fprintf(os.Stderr, "fsnotify error: %v\n", err)
+			slog.Error("fsnotify_error", "err", err)
 		}
 	}
 }
@@ -426,12 +427,12 @@ func chunkEvents(events []models.FileEvent, size int) [][]models.FileEvent {
 
 func (dw *DebouncedWatcher) sendOrQueue(project string, events []models.FileEvent) bool {
 	if err := dw.client.SendBatch(events, project); err != nil {
-		fmt.Fprintf(os.Stderr, "send failed for project %s, queuing locally: %v\n", project, err)
+		slog.Warn("send_failed_queuing_locally", "project", project, "err", err)
 		if dw.queue == nil {
 			return false
 		}
 		if qerr := dw.queue.Enqueue(dw.cfg.MachineID, project, events); qerr != nil {
-			fmt.Fprintf(os.Stderr, "queue error: %v\n", qerr)
+			slog.Error("queue_error", "err", qerr)
 			return false
 		}
 		dw.markDurable(events)

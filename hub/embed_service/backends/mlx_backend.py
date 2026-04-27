@@ -3,8 +3,11 @@
 import os
 
 import numpy as np
+import structlog
 
 from .base import BaseBackend, mean_pool, prefix_texts
+
+logger = structlog.get_logger(__name__)
 
 DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 
@@ -44,7 +47,7 @@ class MlxBackend(BaseBackend):
         from transformers import AutoModel
 
         self._model = AutoModel.from_pretrained(local_dir)
-        print(f"[mlx] Loaded {self.model_name}")
+        logger.info("model_loaded", backend="mlx", model=self.model_name)
 
     @property
     def name(self) -> str:

@@ -4,10 +4,13 @@ import os
 from pathlib import Path
 
 import numpy as np
+import structlog
 from huggingface_hub import hf_hub_download, snapshot_download
 from tokenizers import Tokenizer
 
 from .base import BaseBackend, mean_pool, prefix_texts
+
+logger = structlog.get_logger(__name__)
 
 DEFAULT_MODEL = "nomic-ai/nomic-embed-text-v1.5"
 ONNX_FILE = "onnx/model.onnx"
@@ -29,7 +32,7 @@ class OnnxBackend(BaseBackend):
         import onnxruntime as ort
 
         providers = ort.get_available_providers()
-        print(f"[onnx] Available providers: {providers}")
+        logger.debug("onnx_providers_available", providers=providers)
 
         if self.model_path and Path(self.model_path).exists():
             onnx_path = self.model_path
@@ -51,7 +54,7 @@ class OnnxBackend(BaseBackend):
         self._session = ort.InferenceSession(str(onnx_path), providers=providers)
         self._tokenizer = Tokenizer.from_file(str(tok_path))
         self._tokenizer.enable_truncation(max_length=8192)
-        print(f"[onnx] Loaded {self.model_name} with providers {self._session.get_providers()}")
+        logger.info("model_loaded", backend="onnx", model=self.model_name, providers=self._session.get_providers())
 
     @property
     def name(self) -> str:

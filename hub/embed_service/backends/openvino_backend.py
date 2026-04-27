@@ -1,8 +1,11 @@
 """OpenVINO execution provider for Intel CPU optimization."""
 
 import numpy as np
+import structlog
 
 from .onnx_backend import OnnxBackend
+
+logger = structlog.get_logger(__name__)
 
 
 class OpenVinoBackend(OnnxBackend):
@@ -45,9 +48,7 @@ class OpenVinoBackend(OnnxBackend):
         from tokenizers import Tokenizer
 
         self._tokenizer = Tokenizer.from_file(str(tok_path))
-        print(
-            f"[openvino] Loaded {self.model_name} with providers {self._session.get_providers()}"
-        )
+        logger.info("model_loaded", backend="openvino", model=self.model_name, providers=self._session.get_providers())
 
     @property
     def name(self) -> str:

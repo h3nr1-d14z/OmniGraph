@@ -6,7 +6,10 @@ import time
 from typing import Any, Callable, TypeVar
 
 import neo4j
+import structlog
 from neo4j.exceptions import TransientError
+
+logger = structlog.get_logger(__name__)
 
 ALLOWED_RELATIONS = {"DEPENDS_ON", "CALLS", "IMPORTS", "IMPLEMENTS", "EXTENDS"}
 
@@ -133,9 +136,7 @@ class MemgraphCodeGraph:
                     "ASSERT e.machine_id, e.project, e.file_path, e.name IS UNIQUE"
                 )
             except Exception as exc:
-                print(
-                    f"[memgraph] entity uniqueness constraint not applied: {exc}"
-                )
+                logger.warning("memgraph_constraint_not_applied", constraint="entity_uniqueness", exc=str(exc))
 
     def close(self) -> None:
         self._driver.close()
@@ -462,17 +463,17 @@ class MemgraphCodeGraph:
             except TransientError as exc:
                 attempt += 1
                 if attempt >= max_attempts:
-                    print(
-                        f"[memgraph] atomic_replace_file giving up after "
-                        f"{attempt} attempts: {exc}"
-                    )
+                    logger.error("memgraph_retry_giving_up", attempts=attempt, exc=str(exc))
                     raise
                 delay_ms = base_delay_ms * (2 ** (attempt - 1)) + random.uniform(
                     0, base_delay_ms
                 )
-                print(
-                    f"[memgraph] atomic_replace_file TransientError on attempt "
-                    f"{attempt}/{max_attempts}, retrying in {delay_ms:.1f}ms: {exc}"
+                logger.warning(
+                    "memgraph_transient_retry",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    delay_ms=round(delay_ms, 1),
+                    exc=str(exc),
                 )
                 time.sleep(delay_ms / 1000.0)
 

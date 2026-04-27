@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -65,16 +65,14 @@ func (r *Reconciler) Tick(ctx context.Context) error {
 	r.lastDigest = digest
 
 	if deadCount > config.SemanticDeadRowSoftCap {
-		fmt.Fprintf(os.Stderr, "[reconcile] WARNING: dead-row count %d > soft cap %d (operator action recommended)\n",
-			deadCount, config.SemanticDeadRowSoftCap)
+		slog.Warn("reconcile_dead_row_cap_exceeded", "dead_count", deadCount, "soft_cap", config.SemanticDeadRowSoftCap)
 	}
 
 	if deadCount == 0 && len(errorCounts) == 0 {
-		fmt.Fprintf(os.Stderr, "[reconcile] tick %d: 0 dead rows\n", r.tickCount)
+		slog.Info("reconcile_tick", "tick", r.tickCount, "dead_count", 0)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[reconcile] tick %d: dead=%d, error_classes=%v\n",
-		r.tickCount, deadCount, errorCounts)
+	slog.Info("reconcile_tick", "tick", r.tickCount, "dead_count", deadCount, "error_classes", errorCounts)
 	return nil
 }
 
@@ -95,7 +93,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 
 	if err := r.Tick(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "[reconcile] tick error: %v\n", err)
+		slog.Error("reconcile_tick_error", "err", err)
 	}
 
 	ticker := time.NewTicker(r.interval)
@@ -106,7 +104,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := r.Tick(ctx); err != nil {
-				fmt.Fprintf(os.Stderr, "[reconcile] tick error: %v\n", err)
+				slog.Error("reconcile_tick_error", "err", err)
 			}
 		}
 	}

@@ -6,6 +6,8 @@ set -euo pipefail
 
 TUNNEL_NAME="${TUNNEL_NAME:-omnigraph-hub}"
 CONFIG_DIR="${CONFIG_DIR:-./.cloudflared}"
+TUNNEL_HOSTNAME="${TUNNEL_HOSTNAME:-knowledge-db.example.com}"
+HUB_API_PORT="${HUB_API_PORT:-9000}"
 
 echo "=== OmniGraph Cloudflare Tunnel Setup ==="
 echo ""
@@ -40,8 +42,8 @@ tunnel: $TUNNEL_ID
 credentials-file: $CONFIG_DIR/$TUNNEL_ID.json
 
 ingress:
-  - hostname: $TUNNEL_NAME.trycloudflare.com
-    service: http://localhost:8000
+  - hostname: $TUNNEL_HOSTNAME
+    service: http://localhost:$HUB_API_PORT
   - service: http_status:404
 EOF
 
@@ -53,4 +55,6 @@ echo "  cloudflared tunnel run $TUNNEL_NAME"
 echo ""
 echo "Or run as a service:"
 echo "  cloudflared service install"
-echo "  cloudflared tunnel route dns $TUNNEL_NAME $TUNNEL_NAME.trycloudflare.com"
+echo "  cloudflared tunnel route dns $TUNNEL_NAME $TUNNEL_HOSTNAME"
+echo ""
+echo "Override hostname/port via TUNNEL_HOSTNAME and HUB_API_PORT env vars."

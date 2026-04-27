@@ -3,3 +3,5 @@
 -r hub/mcp_server/requirements.txt
 
 pytest>=8.0.0
+structlog>=24.0.0
+flake8-print>=5.0.0

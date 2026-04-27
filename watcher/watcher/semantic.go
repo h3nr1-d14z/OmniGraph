@@ -2,8 +2,7 @@ package watcher
 
 import (
 	"context"
-	"fmt"
-	"os"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"time"
@@ -194,22 +193,22 @@ func (dw *DebouncedWatcher) drainSemanticJobs() {
 	}
 	jobs, err := dw.queue.ClaimDueSemanticJobs(dw.cfg.Semantic.QueueCapacity, semanticLeaseDuration(dw.cfg))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "semantic job claim failed: %v\n", err)
+		slog.Error("semantic_job_claim_failed", "err", err)
 		return
 	}
 	for _, job := range jobs {
 		workerJob := job.WorkerJob()
 		if !dw.isLatestSemanticJob(workerJob) {
 			if err := dw.queue.ReleaseSemanticJob(job.ID, job.ContentHash, job.LeaseVersion, time.Duration(dw.cfg.Semantic.RetryDelayMs)*time.Millisecond); err != nil && err != ErrSemanticJobStale {
-				fmt.Fprintf(os.Stderr, "semantic job release failed for %s: %v\n", job.Path, err)
+				slog.Error("semantic_job_release_failed", "path", job.Path, "err", err)
 			}
 			continue
 		}
 		if !dw.semantic.Enqueue(workerJob) {
 			if err := dw.queue.ReleaseSemanticJob(job.ID, job.ContentHash, job.LeaseVersion, time.Duration(dw.cfg.Semantic.RetryDelayMs)*time.Millisecond); err != nil && err != ErrSemanticJobStale {
-				fmt.Fprintf(os.Stderr, "semantic job release failed for %s: %v\n", job.Path, err)
+				slog.Error("semantic_job_release_failed", "path", job.Path, "err", err)
 			}
-			fmt.Fprintf(os.Stderr, "semantic enqueue skipped for %s: queue full\n", job.Path)
+			slog.Warn("semantic enqueue skipped", "path", job.Path, "reason", "queue_full")
 			return
 		}
 	}
@@ -247,7 +246,7 @@ func (dw *DebouncedWatcher) enqueueSemantic(events []models.FileEvent) {
 	for _, ev := range events {
 		if ev.Type == models.EventDelete || ev.Type == models.EventRename {
 			if err := dw.queue.DeleteSemanticJob(dw.cfg.MachineID, ev.Project, ev.Path); err != nil {
-				fmt.Fprintf(os.Stderr, "semantic job delete failed for %s: %v\n", ev.Path, err)
+				slog.Error("semantic_job_delete_failed", "path", ev.Path, "err", err)
 			}
 			continue
 		}
@@ -266,7 +265,7 @@ func (dw *DebouncedWatcher) enqueueSemantic(events []models.FileEvent) {
 			ContentHash: ev.ContentHash,
 			Content:     []byte(ev.Content),
 		}, dw.cfg.Semantic.MaxRetries); err != nil {
-			fmt.Fprintf(os.Stderr, "semantic job enqueue failed for %s: %v\n", ev.Path, err)
+			slog.Error("semantic_job_enqueue_failed", "path", ev.Path, "err", err)
 			continue
 		}
 		dw.signalSemantic()

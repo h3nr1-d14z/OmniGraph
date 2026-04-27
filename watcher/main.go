@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,12 +13,24 @@ import (
 	"time"
 
 	"github.com/omnigraph/watcher/config"
+	"github.com/omnigraph/watcher/logger"
 	"github.com/omnigraph/watcher/semantic/goresolver"
 	"github.com/omnigraph/watcher/sender"
 	"github.com/omnigraph/watcher/watcher"
 )
 
+func isTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
 func main() {
+	jsonMode := !isTerminal()
+	slog.SetDefault(logger.New(jsonMode))
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
@@ -67,13 +80,13 @@ func runReplay() {
 
 	q, err := watcher.OpenQueue(*queuePath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "queue open: %v\n", err)
+		slog.Error("queue_open_failed", "err", err)
 		os.Exit(1)
 	}
 	defer q.Close()
 
 	if err := q.IncrementReplayCount(*id); err != nil {
-		fmt.Fprintf(os.Stderr, "replay failed: %v\n", err)
+		slog.Error("replay_failed", "err", err)
 		os.Exit(1)
 	}
 	fmt.Printf("replayed semantic_jobs id=%d (state=pending, replay_count incremented; attempt_count untouched)\n", *id)
@@ -104,7 +117,7 @@ func runInit() {
 
 	path := config.DefaultConfigPath()
 	if err := cfg.Save(path); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write config: %v\n", err)
+		slog.Error("config_write_failed", "err", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Config written to %s\n", path)
@@ -127,13 +140,13 @@ func runSemantic() {
 		FilePath: *filePath,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "semantic resolve error: %v\n", err)
+		slog.Error("semantic resolve error", "err", err)
 		os.Exit(1)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(relations); err != nil {
-		fmt.Fprintf(os.Stderr, "semantic encode error: %v\n", err)
+		slog.Error("semantic_encode_error", "err", err)
 		os.Exit(1)
 	}
 }
@@ -162,13 +175,13 @@ func runWatch() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		slog.Error("config_load_failed", "err", err)
 		os.Exit(1)
 	}
 
 	root, err := normalizeWatchRoot(cfg.WatchRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "watch root error: %v\n", err)
+		slog.Error("watch_root_error", "err", err)
 		os.Exit(1)
 	}
 	cfg.WatchRoot = root
@@ -180,7 +193,7 @@ func runWatch() {
 		cfg.Ignore.Extra,
 	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "ignore filter error: %v\n", err)
+		slog.Error("ignore_filter_error", "err", err)
 		os.Exit(1)
 	}
 
@@ -192,24 +205,40 @@ func runWatch() {
 	client := sender.NewClient(cfg.Hub.URL, cfg.Hub.AuthToken, cfg.MachineID)
 	queue, err := watcher.OpenQueue("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "queue open error: %v\n", err)
+		slog.Error("queue_open_failed", "err", err)
 		os.Exit(1)
 	}
 	defer queue.Close()
 
+	// Local-only HTTP endpoint exposing outbox stats for Hub /stats consumption.
+	statsAddr := cfg.QueueStatsAddr
+	if statsAddr == "" {
+		statsAddr = "127.0.0.1:9100"
+	}
+	statsServer := watcher.NewQueueStatsServer(statsAddr, queue)
+	if statsServer != nil {
+		_ = statsServer.Start()
+		slog.Info("queue_stats_listening", "addr", statsAddr)
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = statsServer.Stop(ctx)
+		}()
+	}
+
 	dw, err := watcher.NewDebouncedWatcher(cfg, filter, resolver, client, queue)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "watcher init error: %v\n", err)
+		slog.Error("watcher_init_error", "err", err)
 		os.Exit(1)
 	}
 
 	// Drain any queued events before starting
 	if err := dw.DrainQueue(); err != nil {
-		fmt.Fprintf(os.Stderr, "drain queue error: %v\n", err)
+		slog.Error("drain_queue_error", "err", err)
 	}
 
 	if err := dw.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "watcher start error: %v\n", err)
+		slog.Error("watcher_start_error", "err", err)
 		os.Exit(1)
 	}
 
@@ -221,7 +250,7 @@ func runWatch() {
 		go reconciler.Run(reconcileCtx)
 	}
 
-	fmt.Printf("Watching %s (machine=%s)\n", root, cfg.MachineID)
+	slog.Info("watching", "root", root, "machine_id", cfg.MachineID)
 	fmt.Printf("Hub: %s | Debounce: %dms | Batch: %ds/%d events\n",
 		cfg.Hub.URL, cfg.Hub.DebounceMs, cfg.Hub.BatchSec, cfg.Hub.BatchSize)
 	fmt.Println("Press Ctrl+C to stop.")
@@ -232,7 +261,7 @@ func runWatch() {
 
 	fmt.Println("\nShutting down...")
 	if err := dw.Stop(); err != nil {
-		fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
+		slog.Error("stop_error", "err", err)
 	}
 	fmt.Println("Done.")
 }

@@ -28,6 +28,11 @@ type WatcherConfig struct {
 		MaxEventsPerSec int    `yaml:"max_events_per_sec"`
 	} `yaml:"hub"`
 
+	// Local-only HTTP endpoint exposing outbox stats so Hub `/stats` can
+	// surface dead_semantic_jobs without a direct SQLite read. Empty
+	// disables the server. Bind to 127.0.0.1 — no auth.
+	QueueStatsAddr string `yaml:"queue_stats_addr"`
+
 	Semantic struct {
 		Enabled       bool `yaml:"enabled"`
 		WorkerCount   int  `yaml:"worker_count"`

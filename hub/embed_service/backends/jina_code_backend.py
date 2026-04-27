@@ -11,8 +11,11 @@ import os
 from pathlib import Path
 
 import numpy as np
+import structlog
 
 from .base import BaseBackend, mean_pool
+
+logger = structlog.get_logger(__name__)
 
 DEFAULT_MODEL = "jinaai/jina-embeddings-v2-base-code"
 
@@ -49,7 +52,7 @@ class JinaCodeBackend(BaseBackend):
         self._session = ort.InferenceSession(str(onnx_path), providers=providers)
         self._tokenizer = Tokenizer.from_file(str(tok_path))
         self._tokenizer.enable_truncation(max_length=8192)
-        print(f"[jina-code] Loaded {self.model_name} with providers {self._session.get_providers()}")
+        logger.info("model_loaded", backend="jina-code", model=self.model_name, providers=self._session.get_providers())
 
     @property
     def name(self) -> str:

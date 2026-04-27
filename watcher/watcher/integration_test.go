@@ -1190,6 +1190,73 @@ func TestSemanticOutboxDeleteRemovesPendingJob(t *testing.T) {
 	}
 }
 
+// QueueStatsServer GET /queue/stats returns state counts + dead error
+// classes + pending events. Local-only endpoint consumed by Hub /stats.
+func TestQueueStatsServerHandlerReturnsStateCounts(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	job := semanticworker.Job{
+		MachineID: "m1", Project: "p", Root: "/r", Path: "/r/x.go",
+		ContentHash: "h1", Content: []byte("package x"),
+	}
+	if err := q.UpsertSemanticJob(job, 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := q.Enqueue("m1", "p", []models.FileEvent{{Type: models.EventCreate, Path: "/r/y.go"}}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	srv := NewQueueStatsServer("127.0.0.1:0", q)
+	if srv == nil {
+		t.Fatal("server nil")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/queue/stats", nil)
+	rec := httptest.NewRecorder()
+	srv.handleStats(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp QueueStatsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.StateCounts[string(SemanticJobPending)] != 1 {
+		t.Errorf("expected 1 pending semantic job, got %d", resp.StateCounts[string(SemanticJobPending)])
+	}
+	if resp.PendingEvents != 1 {
+		t.Errorf("expected 1 pending event, got %d", resp.PendingEvents)
+	}
+}
+
+func TestQueueStatsServerRejectsPost(t *testing.T) {
+	q, err := OpenQueue(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer q.Close()
+
+	srv := NewQueueStatsServer("127.0.0.1:0", q)
+	req := httptest.NewRequest(http.MethodPost, "/queue/stats", nil)
+	rec := httptest.NewRecorder()
+	srv.handleStats(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestQueueStatsServerEmptyAddrDisablesServer(t *testing.T) {
+	if NewQueueStatsServer("", nil) != nil {
+		t.Fatal("expected nil server when addr empty")
+	}
+}
+
 //Reconciler.Tick reports dead-row count and per-error-class
 // breakdown. Force one job to dead state, verify Tick observes count > 0.
 func TestReconcileReportsDeadRowCount(t *testing.T) {

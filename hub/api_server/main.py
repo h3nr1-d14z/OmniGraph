@@ -1,16 +1,22 @@
 """Hub API Server — receives batches from Watchers and indexes into Qdrant + Memgraph."""
 
 import os
+import sys
+import unicodedata
 from contextlib import asynccontextmanager
 
 import httpx
+import structlog
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 # Import from sibling package
-import sys
-
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "mcp_server"))
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), ".."))
+
+from logging_config import configure_logging  # noqa: E402
+
+logger = structlog.get_logger(__name__)
 
 from db.content_store import ContentStore, get_store
 from db.memgraph_client import MemgraphCodeGraph, get_memgraph
@@ -30,6 +36,20 @@ SLIDING_STRIDE_CHARS = int(os.getenv("SLIDING_STRIDE_CHARS", "600"))
 MAX_CHUNKS_PER_FILE = int(os.getenv("MAX_CHUNKS_PER_FILE", "64"))
 MAX_CHUNKS_PER_REQUEST = int(os.getenv("MAX_CHUNKS_PER_REQUEST", "32"))
 
+# Watcher /queue/stats endpoint URL. Empty disables the fetch and /stats
+# returns watcher_queue=null. Default points at watcher local-loopback.
+WATCHER_QUEUE_STATS_URL = os.getenv("WATCHER_QUEUE_STATS_URL", "http://localhost:9100/queue/stats")
+WATCHER_QUEUE_STATS_TIMEOUT = float(os.getenv("WATCHER_QUEUE_STATS_TIMEOUT", "2.0"))
+
+
+def _normalize_path(path: str) -> str:
+    """NFC-normalize file paths so the same file under HFS+ NFD and APFS NFC
+    encodings hashes identically. Hub is the dedup arbiter; watchers may emit
+    either encoding depending on filesystem and OS."""
+    if not path:
+        return path
+    return unicodedata.normalize("NFC", path)
+
 
 class BatchIn(BaseModel):
     machine_id: str
@@ -40,6 +60,7 @@ class BatchIn(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging(not sys.stderr.isatty())
     app.state.qdrant = get_qdrant()
     app.state.memgraph = get_memgraph()
     app.state.content = get_store()
@@ -74,6 +95,12 @@ async def receive_batch(batch: BatchIn, request: Request):
     content: ContentStore = request.app.state.content
 
     events = [FileEvent(**ev_raw) for ev_raw in batch.events]
+    # NFC-normalize paths at ingress so dedup keys are stable across watchers
+    # running on different filesystems (HFS+ NFD, APFS/ext4 NFC).
+    for ev in events:
+        ev.path = _normalize_path(ev.path)
+        if ev.old_path:
+            ev.old_path = _normalize_path(ev.old_path)
     deletes = [ev for ev in events if ev.type in ("DELETE", "RENAME")]
     upserts = [ev for ev in events if ev.type not in ("DELETE", "RENAME")]
 
@@ -188,7 +215,7 @@ def _build_embedding_chunks(ev: FileEvent, machine_id: str, project: str) -> lis
 def _cap_chunks_per_file(chunks: list[dict[str, str | int]], path: str) -> list[dict[str, str | int]]:
     if len(chunks) <= MAX_CHUNKS_PER_FILE:
         return chunks
-    print(f"[hub] {path}: produced {len(chunks)} chunks, capped to {MAX_CHUNKS_PER_FILE} (rest skipped)")
+    logger.warning("chunks_capped", path=path, produced=len(chunks), cap=MAX_CHUNKS_PER_FILE)
     return chunks[:MAX_CHUNKS_PER_FILE]
 
 
@@ -313,7 +340,7 @@ async def _handle_upserts(
         content.refresh_project_tree(machine_id, project)
 
     if embed_skipped:
-        print(f"[hub] content-hash short-circuit: skipped embed for {len(embed_skipped)} unchanged file(s)")
+        logger.debug("content_hash_short_circuit", skipped=len(embed_skipped))
 
     if not chunks:
         return
@@ -357,7 +384,7 @@ async def _handle_upserts(
         # docs/consistency.md. Do NOT update content_hash on failure: the
         # watcher will retry, and we want the next batch to take the full
         # re-embed path.
-        print(f"[hub] batch embed failed: {exc}")
+        logger.error("batch_embed_failed", exc=str(exc))
         raise HTTPException(status_code=502, detail=f"embed-service unavailable: {exc}") from exc
 
     # Embed succeeded: persist new hashes to cache + DB so future identical
@@ -413,23 +440,41 @@ def _collect_stats(
         try:
             response[name] = client.stats(machine_id=machine_id, project=project)
         except Exception as exc:
-            print(f"[hub] stats {name} failed: {exc}")
+            logger.error("stats_backend_failed", backend=name, exc=str(exc))
             response["status"] = "degraded"
             response["errors"][name] = "unavailable"
 
     return response
 
 
+async def _fetch_watcher_queue_stats(http: httpx.AsyncClient) -> dict | None:
+    """Fetch watcher /queue/stats with bounded timeout. Returns None on any
+    failure (network, parse, non-2xx) — Hub /stats degrades gracefully so
+    a watcher outage never causes a Hub 5xx."""
+    if not WATCHER_QUEUE_STATS_URL:
+        return None
+    try:
+        resp = await http.get(WATCHER_QUEUE_STATS_URL, timeout=WATCHER_QUEUE_STATS_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        logger.warning("watcher_queue_stats_unreachable", url=WATCHER_QUEUE_STATS_URL, exc=str(exc))
+        return None
+
+
 @app.get("/stats")
 async def stats(request: Request, machine_id: str | None = None, project: str | None = None):
     _verify_auth(request)
-    return _collect_stats(
+    response = _collect_stats(
         content=request.app.state.content,
         qdrant=request.app.state.qdrant,
         memgraph=request.app.state.memgraph,
         machine_id=machine_id,
         project=project,
     )
+    # Optional watcher /queue/stats integration. Null on failure — never 5xx.
+    response["watcher_queue"] = await _fetch_watcher_queue_stats(request.app.state.http)
+    return response
 
 
 @app.get("/health")
