@@ -37,9 +37,11 @@ class JinaCodeBackend(BaseBackend):
 
         cache_dir = os.getenv("MODEL_CACHE")
         kwargs = {"cache_dir": cache_dir} if cache_dir else {}
+        # FP32 only (~614 MB) — INT8 quantization risks entangling quality drift
+        # with the Phase 4 cutover regression gate; revisit after gate passes.
         local_dir = snapshot_download(
             repo_id=self.model_name,
-            allow_patterns=["onnx/*", "tokenizer.json", "config.json"],
+            allow_patterns=["onnx/model.onnx", "tokenizer.json", "config.json"],
             **kwargs,
         )
 
