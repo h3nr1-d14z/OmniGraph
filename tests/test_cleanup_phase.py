@@ -124,4 +124,4 @@ def test_tunnel_script_uses_real_hostname_and_port():
     assert "TUNNEL_HOSTNAME" in src
     assert "HUB_API_PORT" in src
     assert "9000" in src, "default port 9000 (hub-api) missing"
-    assert "knowledge-db.example.com" in src, "real domain default missing"
+    assert "knowledge-db.example.com" in src, "tunnel hostname default missing"
